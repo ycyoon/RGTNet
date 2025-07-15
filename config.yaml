@@ -1,0 +1,55 @@
+# Configuration for RGTNet StructTransform Benchmark
+
+# Model Configuration
+model:
+  vocab_size: 30522
+  d_model: 512
+  nhead: 8
+  num_layers: 6
+  num_labels: 2
+  bias_delta: 1.0
+
+# Training Configuration
+training:
+  batch_size: 32
+  epochs: 3
+  learning_rate: 5e-5
+  warmup_ratio: 0.1
+
+# Evaluation Configuration
+evaluation:
+  batch_size: 32
+  tokenizer_name: "bert-base-uncased"
+  
+# StructTransform Benchmark Configuration
+benchmark:
+  # Directory containing benchmark files
+  benchmark_dir: "benchmark"
+  
+  # Individual dataset files (optional, use if not using benchmark_dir)
+  json_dataset: "benchmark/json_dataset.pkl"
+  sql_dataset: "benchmark/sql_dataset.pkl"
+  cypher_dataset: "benchmark/cypher_dataset.pkl"
+  symlogix_dataset: "benchmark/symlogix_dataset.pkl"
+  
+  # Results output
+  results_file: "struct_transform_results.json"
+
+# Device Configuration
+device: "cuda"  # or "cpu"
+
+# File Paths
+paths:
+  model_save_path: "rgt_finetuned.pth"
+  train_file: null
+  val_file: null
+  
+# Legacy evaluation files (optional)
+legacy:
+  adv_file: null
+  id_file: null
+  ood_file: null
+  instr_metrics: null
+  baseline_outputs: null
+  rgt_outputs: null
+  probe_file: null
