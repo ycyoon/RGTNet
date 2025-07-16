@@ -56,13 +56,16 @@ def train_model(model, head, train_loader, val_loader, device, args):
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            role_mask = batch['role_mask'].to(device)
             labels = batch['labels'].to(device)
             
             # Forward pass
             optimizer.zero_grad()
             
-            # Get model output
-            outputs = model(input_ids, attention_mask=attention_mask)
+            # Get model output with role awareness
+            # Note: attention_mask becomes src_key_padding_mask (inverted)
+            src_key_padding_mask = (attention_mask == 0)
+            outputs = model(input_ids, role_mask, src_key_padding_mask=src_key_padding_mask)
             
             # Use pooled output (mean of sequence)
             pooled_output = outputs.mean(dim=1)
@@ -136,10 +139,12 @@ def evaluate_model(model, head, val_loader, device):
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            role_mask = batch['role_mask'].to(device)
             labels = batch['labels'].to(device)
             
             # Forward pass
-            outputs = model(input_ids, attention_mask=attention_mask)
+            src_key_padding_mask = (attention_mask == 0)
+            outputs = model(input_ids, role_mask, src_key_padding_mask=src_key_padding_mask)
             pooled_output = outputs.mean(dim=1)
             logits = head(pooled_output)
             

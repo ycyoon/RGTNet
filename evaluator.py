@@ -20,11 +20,13 @@ def evaluate_model_detailed(model, head, eval_loader, device, args):
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            role_mask = batch['role_mask'].to(device)
             labels = batch['labels'].to(device)
             original_texts = batch['original_texts']
             
             # Forward pass
-            outputs = model(input_ids, attention_mask=attention_mask)
+            src_key_padding_mask = (attention_mask == 0)
+            outputs = model(input_ids, role_mask, src_key_padding_mask=src_key_padding_mask)
             pooled_output = outputs.mean(dim=1)
             logits = head(pooled_output)
             
@@ -37,15 +39,27 @@ def evaluate_model_detailed(model, head, eval_loader, device, args):
             predictions = logits.squeeze().cpu().numpy()
             ground_truth = labels.cpu().numpy()
             
-            results['predictions'].extend(predictions.tolist())
-            results['ground_truth'].extend(ground_truth.tolist())
+            # Handle scalar predictions (when batch size is 1)
+            if predictions.ndim == 0:
+                predictions = [float(predictions)]
+            else:
+                predictions = predictions.tolist()
+            
+            if ground_truth.ndim == 0:
+                ground_truth = [float(ground_truth)]
+            else:
+                ground_truth = ground_truth.tolist()
+            
+            results['predictions'].extend(predictions)
+            results['ground_truth'].extend(ground_truth)
             
             # Store sample outputs for analysis
             if batch_idx < 5:  # Store first 5 batches for analysis
                 for i in range(min(3, len(original_texts))):  # First 3 samples per batch
+                    pred_val = predictions[i] if i < len(predictions) else predictions[0]
                     results['sample_outputs'].append({
                         'input_text': original_texts[i][:200] + "..." if len(original_texts[i]) > 200 else original_texts[i],
-                        'prediction': float(predictions[i]) if len(predictions.shape) == 1 else float(predictions[i][0]),
+                        'prediction': float(pred_val),
                         'ground_truth': float(ground_truth[i])
                     })
     

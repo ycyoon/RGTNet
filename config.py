@@ -12,6 +12,7 @@ def setup_args():
     parser.add_argument('--num_layers', type=int, default=6, help='Number of transformer layers')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--max_seq_len', type=int, default=512, help='Maximum sequence length')
+    parser.add_argument('--bias_delta', type=float, default=1.0, help='Role-gated attention bias delta')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
