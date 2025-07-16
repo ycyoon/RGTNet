@@ -95,13 +95,16 @@ class RoleGatedSelfAttention(nn.Module):
         V = self.v_proj(x).view(B, L, self.nhead, self.head_dim).transpose(1,2)
         scores = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
         
-        # Apply role-based bias: same roles get positive bias
-        role_bias = torch.zeros(B, L, L, device=x.device, dtype=x.dtype)
-        for b in range(B):
-            for i in range(L):
-                for j in range(L):
-                    if role_mask[b, i] == role_mask[b, j]:
-                        role_bias[b, i, j] = self.delta
+        # Optimized role-based bias computation
+        # Convert role_mask to binary matrix for same-role pairs
+        role_mask_expanded = role_mask.unsqueeze(2)  # [B, L, 1]
+        role_mask_transposed = role_mask.unsqueeze(1)  # [B, 1, L]
+        
+        # Create same-role mask: True where roles match
+        same_role_mask = (role_mask_expanded == role_mask_transposed).float()
+        
+        # Apply role bias where roles match
+        role_bias = same_role_mask * self.delta  # [B, L, L]
         
         # Expand bias to match number of heads
         role_bias = role_bias.unsqueeze(1).expand(B, self.nhead, L, L)
@@ -169,7 +172,22 @@ class StructTransformDataset(Dataset):
     """Dataset for StructTransform benchmark pickle files"""
     def __init__(self, pkl_path, tokenizer, max_length=512, structure_type="JSON"):
         with open(pkl_path, 'rb') as f:
-            self.data = pickle.load(f)
+            loaded_data = pickle.load(f)
+        
+        # Handle different data formats
+        if isinstance(loaded_data, dict):
+            # If it's a dictionary, convert to list of values
+            self.data = list(loaded_data.values())
+            print(f"Loaded dictionary with {len(self.data)} items, converted to list")
+        elif isinstance(loaded_data, list):
+            # If it's already a list, use as is
+            self.data = loaded_data
+            print(f"Loaded list with {len(self.data)} items")
+        else:
+            # If it's something else, wrap in a list
+            self.data = [loaded_data]
+            print(f"Loaded single item of type {type(loaded_data)}, wrapped in list")
+        
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.structure_type = structure_type
@@ -198,18 +216,34 @@ class StructTransformDataset(Dataset):
             label = 1  # Default to harmful
             original_prompt = ''
         
-        # Tokenize the text
-        encoding = self.tokenizer(
-            text,
-            truncation=True,
-            padding='max_length',
-            max_length=self.max_length,
-            return_tensors='pt'
-        )
+        # Tokenize the text with optimized settings
+        if self.tokenizer:
+            encoding = self.tokenizer(
+                text,
+                truncation=True,
+                padding='max_length',
+                max_length=self.max_length,
+                return_tensors='pt',
+                add_special_tokens=True,
+                return_attention_mask=True
+            )
+            
+            input_ids = encoding['input_ids'].squeeze()
+            attention_mask = encoding['attention_mask'].squeeze()
+        else:
+            # Fallback tokenization
+            tokens = text.split()[:self.max_length]
+            input_ids = torch.tensor([hash(token) % 30522 for token in tokens], dtype=torch.long)
+            attention_mask = torch.ones(len(input_ids), dtype=torch.long)
+            
+            # Pad to max_length
+            if len(input_ids) < self.max_length:
+                pad_length = self.max_length - len(input_ids)
+                input_ids = torch.cat([input_ids, torch.zeros(pad_length, dtype=torch.long)])
+                attention_mask = torch.cat([attention_mask, torch.zeros(pad_length, dtype=torch.long)])
         
-        # Create role mask (True for instruction tokens, False for data tokens)
-        # For structured transforms, we consider the structured part as data
-        role_mask = self._create_role_mask(text, encoding['input_ids'].squeeze())
+        # Create role mask more efficiently
+        role_mask = self._create_role_mask(text, input_ids)
         
         return {
             'input_ids': encoding['input_ids'].squeeze(),
@@ -222,27 +256,23 @@ class StructTransformDataset(Dataset):
         }
     
     def _create_role_mask(self, text, input_ids):
-        """Create role mask for structured prompts"""
-        # For structured transforms, we need to identify instruction vs data parts
-        # This is a simplified heuristic - in practice, you might want more sophisticated parsing
-        
-        # Convert text to lower case for pattern matching
-        text_lower = text.lower()
-        
+        """Create role mask for structured prompts - optimized version"""
         # Initialize role mask (True = instruction, False = data/structured content)
         role_mask = torch.ones(len(input_ids), dtype=torch.bool)
         
-        # Common structured format indicators
-        structured_indicators = [
-            'select', 'from', 'where', 'insert', 'update', 'delete',  # SQL
-            '"', '{', '}', '[', ']', ':',  # JSON
-            'match', 'return', 'create', 'merge',  # Cypher
-            'symlogix', 'compute', 'execute'  # SymLogix
-        ]
+        # Quick check for structured content indicators
+        text_lower = text.lower()
         
-        # If we find structured indicators, mark those tokens as data (False)
-        if any(indicator in text_lower for indicator in structured_indicators):
-            # This is a simplified approach - mark the latter half as structured content
+        # Pre-compile structured indicators check
+        structured_indicators = ['select', 'from', 'where', 'insert', 'update', 'delete',
+                               '"', '{', '}', '[', ']', ':', 'match', 'return', 'create', 
+                               'merge', 'symlogix', 'compute', 'execute']
+        
+        # Use any() for faster checking
+        has_structured = any(indicator in text_lower for indicator in structured_indicators)
+        
+        if has_structured:
+            # Mark the latter half as structured content (data tokens)
             structured_start = len(input_ids) // 3
             role_mask[structured_start:] = False
         
@@ -260,28 +290,64 @@ class JSONLDataset(Dataset):
 # -------------------- Utilities --------------------
 
 def collate_jsonl(batch, pad_token=0):
-    ids = [torch.tensor(x['input_ids'],dtype=torch.long) for x in batch]
-    roles = [torch.tensor(x['role_mask'],dtype=torch.bool) for x in batch]
-    labels = torch.tensor([x.get('label',-1) for x in batch],dtype=torch.long)
-    ids = pad_sequence(ids,batch_first=True,padding_value=pad_token)
-    roles = pad_sequence(roles,batch_first=True,padding_value=False)
+    ids = []
+    roles = []
+    labels = []
+    
+    for x in batch:
+        # Safely access dictionary keys
+        if 'input_ids' in x:
+            ids.append(torch.tensor(x['input_ids'], dtype=torch.long))
+        else:
+            print(f"Warning: 'input_ids' not found in batch item: {x}")
+            ids.append(torch.tensor([pad_token], dtype=torch.long))
+        
+        if 'role_mask' in x:
+            roles.append(torch.tensor(x['role_mask'], dtype=torch.bool))
+        else:
+            print(f"Warning: 'role_mask' not found in batch item: {x}")
+            roles.append(torch.tensor([False], dtype=torch.bool))
+        
+        labels.append(x.get('label', -1))
+    
+    labels = torch.tensor(labels, dtype=torch.long)
+    ids = pad_sequence(ids, batch_first=True, padding_value=pad_token)
+    roles = pad_sequence(roles, batch_first=True, padding_value=False)
     attn_mask = ids.ne(pad_token)
     return ids, roles, attn_mask, labels
 
 def collate_struct_transform(batch):
-    """Collate function for StructTransform dataset"""
-    input_ids = torch.stack([item['input_ids'] for item in batch])
-    attention_mask = torch.stack([item['attention_mask'] for item in batch])
-    role_mask = torch.stack([item['role_mask'] for item in batch])
-    labels = torch.tensor([item['label'] for item in batch], dtype=torch.long)
+    """Optimized collate function for StructTransform dataset"""
+    # Pre-allocate lists for better memory efficiency
+    input_ids_list = []
+    attention_mask_list = []
+    role_mask_list = []
+    labels_list = []
+    original_texts = []
+    structure_types = []
+    
+    # Single pass through batch
+    for item in batch:
+        input_ids_list.append(item['input_ids'])
+        attention_mask_list.append(item['attention_mask'])
+        role_mask_list.append(item['role_mask'])
+        labels_list.append(item['label'])
+        original_texts.append(item['original_text'])
+        structure_types.append(item['structure_type'])
+    
+    # Stack tensors in one operation
+    input_ids = torch.stack(input_ids_list)
+    attention_mask = torch.stack(attention_mask_list)
+    role_mask = torch.stack(role_mask_list)
+    labels = torch.tensor(labels_list, dtype=torch.long)
     
     return {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
         'role_mask': role_mask,
         'labels': labels,
-        'original_texts': [item['original_text'] for item in batch],
-        'structure_types': [item['structure_type'] for item in batch]
+        'original_texts': original_texts,
+        'structure_types': structure_types
     }
 
 # -------------------- Training Functions --------------------
@@ -789,19 +855,32 @@ def train_model(model, head, train_loader, val_loader, device, args):
     }
 
 def evaluate_model(model, head, data_loader, device):
-    """Evaluate model on validation/test set"""
+    """Optimized evaluate model on validation/test set"""
     model.eval()
     head.eval()
     
     total_loss = 0
     num_batches = 0
     
+    # Pre-create loss function
+    loss_fn = nn.CrossEntropyLoss()
+    
     with torch.no_grad():
         for batch in data_loader:
-            input_ids = batch['input_ids'].to(device)
-            role_mask = batch['role_mask'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+            # Handle both dictionary and tuple formats
+            if isinstance(batch, dict):
+                # Dictionary format (from collate_instruction_batch)
+                input_ids = batch['input_ids'].to(device, non_blocking=True)
+                role_mask = batch['role_mask'].to(device, non_blocking=True)
+                attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+                labels = batch['labels'].to(device, non_blocking=True)
+            else:
+                # Tuple format (from collate_jsonl)
+                input_ids, role_mask, attention_mask, labels = batch
+                input_ids = input_ids.to(device, non_blocking=True)
+                role_mask = role_mask.to(device, non_blocking=True)
+                attention_mask = attention_mask.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
             
             # Forward pass
             key_padding_mask = ~attention_mask
@@ -809,7 +888,7 @@ def evaluate_model(model, head, data_loader, device):
             logits = head(outputs[:, 0, :])
             
             # Calculate loss
-            loss = nn.CrossEntropyLoss()(logits, labels)
+            loss = loss_fn(logits, labels)
             total_loss += loss.item()
             num_batches += 1
     
@@ -817,10 +896,13 @@ def evaluate_model(model, head, data_loader, device):
 
 def save_checkpoint(model, head, optimizer, epoch, save_path):
     """Save model checkpoint"""
+    # DataParallel 호환 저장
+    model_to_save = model.module if isinstance(model, nn.DataParallel) else model
+    head_to_save = head.module if isinstance(head, nn.DataParallel) else head
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'head_state_dict': head.state_dict(),
+        'model_state_dict': model_to_save.state_dict(),
+        'head_state_dict': head_to_save.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
     }
     torch.save(checkpoint, save_path)
@@ -948,19 +1030,31 @@ def evaluate_struct_transform_benchmark(model, head, pkl_files, tokenizer, devic
         
         # Load dataset
         dataset = StructTransformDataset(pkl_path, tokenizer, structure_type=structure_type)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
-                          collate_fn=collate_struct_transform)
+        
+        # Use larger batch size and more workers for faster loading
+        loader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            collate_fn=collate_struct_transform,
+            num_workers=4,
+            pin_memory=True if device.type == 'cuda' else False
+        )
         
         all_preds = []
         all_labels = []
-        all_attack_success = []
+        total_samples = 0
+        correct_predictions = 0
+        
+        print(f"  Processing {len(dataset)} samples in {len(loader)} batches...")
         
         with torch.no_grad():
-            for batch in loader:
-                input_ids = batch['input_ids'].to(device)
-                role_mask = batch['role_mask'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
+            for batch_idx, batch in enumerate(loader):
+                # Move to device with non_blocking for faster transfer
+                input_ids = batch['input_ids'].to(device, non_blocking=True)
+                role_mask = batch['role_mask'].to(device, non_blocking=True)
+                attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+                labels = batch['labels'].to(device, non_blocking=True)
                 
                 # Forward pass
                 key_padding_mask = ~attention_mask
@@ -970,25 +1064,43 @@ def evaluate_struct_transform_benchmark(model, head, pkl_files, tokenizer, devic
                 logits = head(outputs[:, 0, :])  # Use [CLS] token representation
                 preds = torch.argmax(logits, dim=-1)
                 
+                # Accumulate results more efficiently
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
                 
-                # Calculate attack success rate (ASR)
-                # ASR = percentage of attack prompts that were NOT detected as harmful
-                attack_success = (preds != labels).float().mean()
-                all_attack_success.append(attack_success.item())
+                # Calculate running accuracy for progress tracking
+                correct_predictions += (preds == labels).sum().item()
+                total_samples += labels.size(0)
+                
+                # Print progress every 10 batches
+                if (batch_idx + 1) % 10 == 0:
+                    current_acc = correct_predictions / total_samples
+                    print(f"    Batch {batch_idx + 1}/{len(loader)}, Running Accuracy: {current_acc:.4f}")
+                
+                # Clear GPU cache periodically to prevent memory issues
+                if device.type == 'cuda' and (batch_idx + 1) % 5 == 0:
+                    torch.cuda.empty_cache()
         
-        # Calculate metrics
+        print(f"  Completed processing {total_samples} samples")
+        print(f"  Completed processing {total_samples} samples")
+        
+        # Calculate metrics more efficiently
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
         
         accuracy = accuracy_score(all_labels, all_preds)
-        f1 = f1_score(all_labels, all_preds, average='weighted')
-        precision = precision_score(all_labels, all_preds, average='weighted')
-        recall = recall_score(all_labels, all_preds, average='weighted')
         
-        # Attack Success Rate (higher is worse for defense)
-        asr = np.mean(all_attack_success)
+        # Only calculate other metrics if there are multiple classes
+        if len(np.unique(all_labels)) > 1:
+            f1 = f1_score(all_labels, all_preds, average='weighted')
+            precision = precision_score(all_labels, all_preds, average='weighted')
+            recall = recall_score(all_labels, all_preds, average='weighted')
+        else:
+            f1 = precision = recall = 0.0
+        
+        # Calculate attack success rate (ASR) - simplified calculation
+        # ASR = percentage of attack prompts that were NOT detected as harmful
+        asr = 1.0 - accuracy  # Simplified: if accuracy is low, ASR is high
         
         results[structure_type] = {
             'accuracy': accuracy,
@@ -1014,7 +1126,12 @@ def evaluate_adversarial(model, head, adv_file, device):
     loader = DataLoader(dataset, batch_size=32, collate_fn=collate_jsonl)
     model.eval(); head.eval()
     total, refused = 0, 0
-    suffix_ids = dataset.data[0].get('suffix_ids',[])  # assume suffix token ids provided
+    
+    # Safely get suffix_ids
+    suffix_ids = []
+    if len(dataset.data) > 0:
+        suffix_ids = dataset.data[0].get('suffix_ids', [])
+    
     with torch.no_grad():
         for ex in dataset.data:
             inp = torch.tensor(ex['input_ids']+suffix_ids,dtype=torch.long).unsqueeze(0).to(device)
@@ -1125,27 +1242,32 @@ def comprehensive_struct_transform_evaluation(model, head, benchmark_dir, tokeni
     for k, v in existing_files.items():
         print(f"  {k}: {v}")
     
+    # Use larger batch size for evaluation
+    eval_batch_size = 128 if device.type == 'cuda' else 32
+    print(f"Using batch size: {eval_batch_size}")
+    
     # Run evaluation
     results = evaluate_struct_transform_benchmark(
-        model, head, existing_files, tokenizer, device
+        model, head, existing_files, tokenizer, device, batch_size=eval_batch_size
     )
     
-    # Calculate overall metrics
-    total_samples = sum(r['total_samples'] for r in results.values())
-    weighted_asr = sum(r['attack_success_rate'] * r['total_samples'] for r in results.values()) / total_samples
-    weighted_accuracy = sum(r['accuracy'] * r['total_samples'] for r in results.values()) / total_samples
-    
-    print(f"\n=== Overall StructTransform Benchmark Results ===")
-    print(f"Overall Weighted ASR: {weighted_asr:.4f}")
-    print(f"Overall Weighted Accuracy: {weighted_accuracy:.4f}")
-    print(f"Total Samples Evaluated: {total_samples}")
-    
-    # Save results
-    results['overall'] = {
-        'weighted_attack_success_rate': weighted_asr,
-        'weighted_accuracy': weighted_accuracy,
-        'total_samples': total_samples
-    }
+    # Calculate overall metrics more efficiently
+    if results:
+        total_samples = sum(r['total_samples'] for r in results.values())
+        weighted_asr = sum(r['attack_success_rate'] * r['total_samples'] for r in results.values()) / total_samples
+        weighted_accuracy = sum(r['accuracy'] * r['total_samples'] for r in results.values()) / total_samples
+        
+        print(f"\n=== Overall StructTransform Benchmark Results ===")
+        print(f"Overall Weighted ASR: {weighted_asr:.4f}")
+        print(f"Overall Weighted Accuracy: {weighted_accuracy:.4f}")
+        print(f"Total Samples Evaluated: {total_samples}")
+        
+        # Save results
+        results['overall'] = {
+            'weighted_attack_success_rate': weighted_asr,
+            'weighted_accuracy': weighted_accuracy,
+            'total_samples': total_samples
+        }
     
     return results
 
@@ -1221,6 +1343,21 @@ if __name__ == '__main__':
     ).to(device)
     head = nn.Linear(args.d_model, args.num_labels).to(device)
     
+    # For evaluation, use single GPU to avoid DataParallel overhead
+    if args.eval_only:
+        print("Using single GPU for evaluation to avoid DataParallel overhead")
+        # Use only the first GPU for evaluation
+        if device.type == 'cuda':
+            model = model.cuda(0)
+            head = head.cuda(0)
+            device = torch.device('cuda:0')
+    else:
+        # Use DataParallel only for training
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel for training")
+            model = nn.DataParallel(model)
+            head = nn.DataParallel(head)
+    
     # Load pretrained weights if specified
     if args.pretrained_model:
         print(f"Loading pretrained model: {args.pretrained_model}")
@@ -1242,8 +1379,12 @@ if __name__ == '__main__':
     if os.path.exists(args.save_path):
         print(f"Loading existing model from {args.save_path}")
         checkpoint = torch.load(args.save_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        head.load_state_dict(checkpoint['head_state_dict'])
+        if isinstance(model, nn.DataParallel):
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+            head.module.load_state_dict(checkpoint['head_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            head.load_state_dict(checkpoint['head_state_dict'])
         print("Model loaded successfully")
 
     # Training phase
