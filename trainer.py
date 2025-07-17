@@ -9,9 +9,8 @@ from tqdm import tqdm
 def train_model(model, head, train_loader, val_loader, device, args):
     """Train the RoleAwareTransformer model"""
     
-    # Move models to device
-    model = model.to(device)
-    head = head.to(device)
+    # Models are already on device and wrapped with DataParallel from main.py
+    # Don't move them again to avoid issues
     
     # Optimizer and scheduler
     optimizer = AdamW(

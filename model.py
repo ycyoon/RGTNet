@@ -76,23 +76,31 @@ class RoleGatedSelfAttention(nn.Module):
 
     def forward(self, x, role_mask, attn_mask=None, key_padding_mask=None):
         B, L, _ = x.size()
+        
+        # QKV projection
         Q = self.q_proj(x).view(B, L, self.nhead, self.head_dim).transpose(1,2)
         K = self.k_proj(x).view(B, L, self.nhead, self.head_dim).transpose(1,2)
         V = self.v_proj(x).view(B, L, self.nhead, self.head_dim).transpose(1,2)
+        
+        # Attention scores
         scores = torch.matmul(Q, K.transpose(-2,-1)) * self.scale
         
-        # Apply role-based bias: same roles get positive bias
-        role_bias = torch.zeros(B, L, L, device=x.device, dtype=x.dtype)
-        for b in range(B):
-            for i in range(L):
-                for j in range(L):
-                    if role_mask[b, i] == role_mask[b, j]:
-                        role_bias[b, i, j] = self.delta
+        # Apply role-based bias: same roles get positive bias (optimized)
+        # Create role comparison matrix more efficiently
+        role_mask_expanded = role_mask.unsqueeze(2)  # [B, L, 1]
+        role_mask_transposed = role_mask.unsqueeze(1)  # [B, 1, L]
+        
+        # Create same-role mask: True where roles match
+        same_role_mask = (role_mask_expanded == role_mask_transposed).float()
+        
+        # Apply role bias where roles match
+        role_bias = same_role_mask * self.delta  # [B, L, L]
         
         # Expand bias to match number of heads
         role_bias = role_bias.unsqueeze(1).expand(B, self.nhead, L, L)
         scores = scores + role_bias
         
+        # Apply masks
         if attn_mask is not None:
             scores = scores.masked_fill(attn_mask.bool(), float('-inf'))
         if key_padding_mask is not None:
@@ -104,9 +112,12 @@ class RoleGatedSelfAttention(nn.Module):
         # Handle NaN values that can occur during training
         attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
         
+        # Apply attention to values
         out = torch.matmul(attn, V)
         out = out.transpose(1,2).contiguous().view(B,L,-1)
-        return self.out_proj(out)
+        out = self.out_proj(out)
+        
+        return out
 
 class RoleAwareTransformerLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, bias_delta=1.0):
@@ -121,12 +132,21 @@ class RoleAwareTransformerLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, src, role_mask, src_mask=None, src_key_padding_mask=None):
+        # Self-attention
         attn_out = self.self_attn(src, role_mask, src_mask, src_key_padding_mask)
+        
+        # First residual connection and normalization
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
+        
+        # Feed-forward network
         ff = self.linear2(self.dropout(torch.relu(self.linear1(src))))
+        
+        # Second residual connection and normalization
         src = src + self.dropout2(ff)
-        return self.norm2(src)
+        result = self.norm2(src)
+        
+        return result
 
 class RoleAwareTransformerEncoder(nn.Module):
     def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=6,
@@ -142,11 +162,19 @@ class RoleAwareTransformerEncoder(nn.Module):
 
     def forward(self, token_ids, role_mask, src_key_padding_mask=None):
         B, L = token_ids.size()
+        
+        # Embedding
         x = self.embedding(token_ids, role_mask)
+        
+        # Position encoding
         positions = torch.arange(L, device=token_ids.device).unsqueeze(0).expand(B,L)
         x = x + self.pos_encoder(positions)
+        
+        # Transformer layers
         for layer in self.layers:
             x = layer(x, role_mask, src_key_padding_mask=src_key_padding_mask)
+        
+        # Final normalization
         return self.norm(x)
 
 # -------------------- Helper Functions --------------------
@@ -207,11 +235,15 @@ def adapt_pretrained_weights(rgt_model, pretrained_model):
         return False
 
 def save_checkpoint(model, head, optimizer, scheduler, epoch, loss, path):
-    """Save model checkpoint"""
+    """Save model checkpoint with DataParallel support"""
+    # Extract the actual model from DataParallel wrapper if needed
+    model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+    head_state = head.module.state_dict() if hasattr(head, 'module') else head.state_dict()
+    
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'head_state_dict': head.state_dict(),
+        'model_state_dict': model_state,
+        'head_state_dict': head_state,
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'loss': loss,
@@ -220,10 +252,20 @@ def save_checkpoint(model, head, optimizer, scheduler, epoch, loss, path):
     print(f"Checkpoint saved to {path}")
 
 def load_checkpoint(model, head, optimizer, scheduler, path):
-    """Load model checkpoint"""
+    """Load model checkpoint with DataParallel support"""
     checkpoint = torch.load(path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    head.load_state_dict(checkpoint['head_state_dict'])
+    
+    # Handle DataParallel wrapped models
+    if hasattr(model, 'module'):
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+    if hasattr(head, 'module'):
+        head.module.load_state_dict(checkpoint['head_state_dict'])
+    else:
+        head.load_state_dict(checkpoint['head_state_dict'])
+    
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     

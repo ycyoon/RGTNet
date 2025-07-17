@@ -15,6 +15,9 @@ from data_loader import download_instruction_datasets, create_data_loaders, load
 from trainer import train_model
 from evaluator import evaluate_model_detailed, save_evaluation_results, print_evaluation_summary
 from utils import set_seed, print_model_info, format_time, check_gpu_memory, save_results
+import torch
+import torch.nn as nn
+import torch.nn.parallel
 
 def main():
     """Main execution function"""
@@ -42,6 +45,18 @@ def main():
     print("Creating model...")
     model, head = create_model(args, tokenizer)
     print_model_info(model, head)
+    
+    # Move models to device first
+    model = model.to(device)
+    head = head.to(device)
+
+    # DataParallel setup
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+        head = torch.nn.DataParallel(head)
+    else:
+        print("Using single GPU")
     
     # Data preparation
     train_data, val_data = None, None

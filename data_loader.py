@@ -240,9 +240,19 @@ def create_data_loaders(train_data, val_data, tokenizer, args):
     train_dataset = InstructionDataset(train_data, tokenizer, args.max_seq_len)
     val_dataset = InstructionDataset(val_data, tokenizer, args.max_seq_len)
     
+    # Adjust batch size for DataParallel
+    # DataParallel splits the batch across available GPUs
+    effective_batch_size = args.batch_size
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
+    if gpu_count > 1:
+        print(f"DataParallel detected: Using {gpu_count} GPUs")
+        print(f"Effective batch size per GPU: {effective_batch_size}")
+        print(f"Total effective batch size: {effective_batch_size * gpu_count}")
+    
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=effective_batch_size,
         shuffle=True,
         collate_fn=collate_instruction_batch,
         num_workers=0,  # Disable multiprocessing to avoid deadlock
@@ -251,7 +261,7 @@ def create_data_loaders(train_data, val_data, tokenizer, args):
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=effective_batch_size,
         shuffle=False,
         collate_fn=collate_instruction_batch,
         num_workers=0,  # Disable multiprocessing to avoid deadlock
