@@ -31,20 +31,11 @@ def load_results(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def print_model_info(model, head):
-    """Print model information"""
-    model_params = count_parameters(model)
-    head_params = count_parameters(head)
-    total_params = model_params + head_params
-    
-    print("\n" + "="*50)
-    print("MODEL INFORMATION")
-    print("="*50)
-    print(f"Model parameters: {model_params:,}")
-    print(f"Head parameters: {head_params:,}")
+def print_model_info(model):
+    print("Model architecture:")
+    print(model)
+    total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
-    print(f"Model size: ~{total_params * 4 / 1024 / 1024:.1f} MB")
-    print("="*50)
 
 def format_time(seconds):
     """Format time in seconds to human readable format"""
@@ -66,7 +57,7 @@ def check_gpu_memory():
         for i in range(torch.cuda.device_count()):
             memory_allocated = torch.cuda.memory_allocated(i) / 1024**3
             memory_cached = torch.cuda.memory_reserved(i) / 1024**3
-            print(f"GPU {i}: {memory_allocated:.2f}GB allocated, {memory_cached:.2f}GB cached")
+            #print(f"GPU {i}: {memory_allocated:.2f}GB allocated, {memory_cached:.2f}GB cached")
     else:
         print("No GPU available")
 

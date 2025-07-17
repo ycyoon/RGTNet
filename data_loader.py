@@ -5,136 +5,51 @@ import json
 import os
 from pathlib import Path
 
-class InstructionDataset(Dataset):
-    def __init__(self, data, tokenizer, max_length=512):
+class GenerationDataset(Dataset):
+    def __init__(self, data, tokenizer, max_length=512, num_roles=2):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
-    
+        self.num_roles = num_roles
     def __len__(self):
         return len(self.data)
-    
     def __getitem__(self, idx):
         item = self.data[idx]
-        
-        # Prepare input text and role information
-        if isinstance(item, dict):
-            if 'conversations' in item:
-                text, role_info = self._format_conversation_with_roles(item['conversations'])
-            elif 'instruction' in item:
-                text, role_info = self._format_instruction_with_roles(item)
-            else:
-                text = str(item)
-                role_info = None
-        else:
-            text = str(item)
-            role_info = None
-        
-        # Tokenize
-        encoding = self.tokenizer(
-            text,
-            truncation=True,
-            padding='max_length',
-            max_length=self.max_length,
-            return_tensors='pt'
-        )
-        
-        # Create role mask for tokens
-        role_mask = self._create_role_mask(text, role_info, encoding)
-        
-        return {
-            'input_ids': encoding['input_ids'].squeeze(),
-            'attention_mask': encoding['attention_mask'].squeeze(),
-            'role_mask': role_mask,
-            'labels': torch.tensor(0, dtype=torch.long),  # Dummy label
-            'original_text': text
-        }
-    
-    def _format_conversation_with_roles(self, conversations):
-        """Format conversation data with role information"""
-        formatted = []
-        role_segments = []
-        
-        for conv in conversations:
-            role = conv.get('from', 'user')
-            content = conv.get('value', '')
-            
-            # Map roles: human/user = instruction (True), assistant/gpt = data (False)
-            is_instruction = role in ['human', 'user']
-            
-            formatted.append(f"{role}: {content}")
-            role_segments.append((len("\n".join(formatted)), is_instruction))
-        
-        return "\n".join(formatted), role_segments
-    
-    def _format_instruction_with_roles(self, item):
-        """Format instruction data with role information"""
-        instruction = item.get('instruction', '')
+        prompt = item.get('instruction', '')
         output = item.get('output', '')
-        
-        text = f"Instruction: {instruction}\nResponse: {output}"
-        
-        # Instruction part is True, response part is False
-        instr_len = len(f"Instruction: {instruction}\n")
-        role_segments = [(instr_len, True), (len(text), False)]
-        
-        return text, role_segments
-    
-    def _create_role_mask(self, text, role_info, encoding):
-        """Create token-level role mask"""
-        # Initialize all tokens as instruction tokens (True)
-        role_mask = torch.ones(self.max_length, dtype=torch.bool)
-        
-        if role_info is not None:
-            # Simple heuristic: split at response indicators
-            response_start = -1
-            text_lower = text.lower()
-            
-            for indicator in ['response:', 'assistant:', 'gpt:']:
-                pos = text_lower.find(indicator)
-                if pos != -1:
-                    response_start = pos
-                    break
-            
-            if response_start != -1:
-                # Estimate token position where response starts
-                pre_response = text[:response_start]
-                post_response = text[response_start:]
-                
-                # Rough estimation: characters to tokens ratio
-                char_to_token_ratio = len(encoding['input_ids'].squeeze()) / len(text) if len(text) > 0 else 0
-                response_token_start = int(response_start * char_to_token_ratio)
-                
-                # Set tokens after response start as data tokens (False)
-                if response_token_start < self.max_length:
-                    role_mask[response_token_start:] = False
-        
-        return role_mask
-    
-    def _format_conversation(self, conversations):
-        """Format conversation data"""
-        formatted = []
-        for conv in conversations:
-            role = conv.get('from', 'user')
-            content = conv.get('value', '')
-            formatted.append(f"{role}: {content}")
-        return "\n".join(formatted)
+        # 프롬프트와 정답을 이어붙여 causal LM 학습
+        full_text = prompt + self.tokenizer.eos_token + output + self.tokenizer.eos_token
+        encoding = self.tokenizer(full_text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
+        input_ids = encoding['input_ids'].squeeze()
+        # input_ids가 vocab_size 이상인 경우 unk_token_id로 대체
+        unk_token_id = self.tokenizer.unk_token_id if self.tokenizer.unk_token_id is not None else 0
+        input_ids[input_ids >= self.tokenizer.vocab_size] = unk_token_id
+        # assert input_ids.max().item() < self.tokenizer.vocab_size, f"input_ids max {input_ids.max().item()} >= vocab_size {self.tokenizer.vocab_size}"
+        labels = input_ids.clone()
+        # 역할 정보: instruction 부분은 0(user), output 부분은 1(assistant)로 마킹
+        # 간단하게 prompt 길이까지 0, 그 이후 1로 설정
+        prompt_encoding = self.tokenizer(prompt + self.tokenizer.eos_token, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
+        prompt_len = (prompt_encoding['attention_mask'].squeeze() == 1).sum().item()
+        role_mask = torch.zeros(self.max_length, dtype=torch.long)
+        if prompt_len < self.max_length:
+            role_mask[prompt_len:] = 1
+        # 안전하게 0~num_roles-1로 clamp
+        role_mask = torch.clamp(role_mask, 0, self.num_roles-1)
+        return {'input_ids': input_ids, 'labels': labels, 'role_mask': role_mask}
 
-def collate_instruction_batch(batch):
-    """Collate function for instruction dataset"""
+def collate_generation_batch(batch):
     input_ids = torch.stack([item['input_ids'] for item in batch])
-    attention_mask = torch.stack([item['attention_mask'] for item in batch])
-    role_mask = torch.stack([item['role_mask'] for item in batch])
     labels = torch.stack([item['labels'] for item in batch])
-    original_texts = [item['original_text'] for item in batch]
-    
-    return {
-        'input_ids': input_ids,
-        'attention_mask': attention_mask,
-        'role_mask': role_mask,
-        'labels': labels,
-        'original_texts': original_texts
-    }
+    role_mask = torch.stack([item['role_mask'] for item in batch])
+    return {'input_ids': input_ids, 'labels': labels, 'role_mask': role_mask}
+
+def pad_to_multiple(data, multiple):
+    n = len(data)
+    if n % multiple != 0:
+        extra = multiple - (n % multiple)
+        # deepcopy 대신 shallow copy로 충분 (dict)
+        data += [data[0].copy() for _ in range(extra)]
+    return data
 
 def download_instruction_datasets():
     """Download and prepare instruction-following datasets"""
@@ -152,40 +67,54 @@ def download_instruction_datasets():
     
     # Try multiple datasets with error handling
     datasets_to_try = [
-        {
-            'name': 'Alpaca',
-            'id': 'tatsu-lab/alpaca',
-            'samples': 10000
-        },
-        {
-            'name': 'OpenAssistant Conversations',
-            'id': 'OpenAssistant/oasst1',
-            'samples': 8000
-        },
+        # {
+        #     'name': 'Alpaca',
+        #     'id': 'tatsu-lab/alpaca',
+        #     'samples': 10000
+        # },
+        # {
+        #     'name': 'OpenAssistant Conversations',
+        #     'id': 'OpenAssistant/oasst1',
+        #     'samples': 8000
+        # },
         {
             'name': 'Databricks Dolly',
             'id': 'databricks/databricks-dolly-15k',
             'samples': 7000
         },
-        {
-            'name': 'Stanford Human Preferences',
-            'id': 'Anthropic/hh-rlhf',
-            'samples': 5000
-        },
-        {
-            'name': 'WizardLM Evol Instruct',
-            'id': 'WizardLM/WizardLM_evol_instruct_70k',
-            'samples': 5000
-        }
+        # {
+        #     'name': 'Stanford Human Preferences',
+        #     'id': 'Anthropic/hh-rlhf',
+        #     'samples': 5000
+        # },
+        # {
+        #     'name': 'WizardLM Evol Instruct',
+        #     'id': 'WizardLM/WizardLM_evol_instruct_70k',
+        #     'samples': 5000
+        # }
     ]
     
     for dataset_info in datasets_to_try:
         try:
             print(f"Loading {dataset_info['name']} dataset...")
             dataset = load_dataset(dataset_info['id'], split="train")
-            sample_count = min(len(dataset), dataset_info['samples'])
-            all_data.extend(dataset[:sample_count])
-            print(f"✅ Loaded {sample_count} samples from {dataset_info['name']}")
+            # sample_count = min(len(dataset), dataset_info['samples'])
+            # all_data.extend(dataset[:sample_count])
+            # 전체 데이터 사용 (Dataset, DatasetDict, IterableDataset 모두 지원)
+            if hasattr(dataset, 'keys') and 'train' in dataset:
+                # DatasetDict인 경우 train split만 사용
+                split_data = dataset['train']
+            else:
+                split_data = dataset
+            # DatasetDict, IterableDatasetDict, IterableColumn 등은 list로 변환
+            try:
+                split_data_list = list(split_data)
+                n_samples = len(split_data_list)
+                all_data.extend(split_data_list)
+                print(f"✅ Loaded {n_samples} samples from {dataset_info['name']}")
+            except Exception as e:
+                print(f"❌ Could not process {dataset_info['name']} samples: {e}")
+                continue
         except Exception as e:
             print(f"❌ Error loading {dataset_info['name']} dataset: {str(e)[:100]}...")
             continue
@@ -228,6 +157,10 @@ def download_instruction_datasets():
     split_idx = int(len(all_data) * 0.9)
     train_data = all_data[:split_idx]
     val_data = all_data[split_idx:]
+    # DDP 환경에서 world_size(8)의 배수로 맞추기
+    world_size = 8
+    train_data = pad_to_multiple(train_data, world_size)
+    val_data = pad_to_multiple(val_data, world_size)
     
     print(f"Total samples: {len(all_data)}")
     print(f"Training samples: {len(train_data)}")
@@ -235,39 +168,34 @@ def download_instruction_datasets():
     
     return train_data, val_data
 
-def create_data_loaders(train_data, val_data, tokenizer, args):
-    """Create data loaders"""
-    train_dataset = InstructionDataset(train_data, tokenizer, args.max_seq_len)
-    val_dataset = InstructionDataset(val_data, tokenizer, args.max_seq_len)
-    
-    # Adjust batch size for DataParallel
-    # DataParallel splits the batch across available GPUs
+def create_data_loaders(train_dataset, val_dataset, tokenizer, args, train_sampler=None, val_sampler=None):
     effective_batch_size = args.batch_size
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    
+    num_workers = getattr(args, 'num_workers', 8)
     if gpu_count > 1:
         print(f"DataParallel detected: Using {gpu_count} GPUs")
         print(f"Effective batch size per GPU: {effective_batch_size}")
         print(f"Total effective batch size: {effective_batch_size * gpu_count}")
-    
     train_loader = DataLoader(
         train_dataset,
         batch_size=effective_batch_size,
-        shuffle=True,
-        collate_fn=collate_instruction_batch,
-        num_workers=0,  # Disable multiprocessing to avoid deadlock
-        pin_memory=False
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        collate_fn=collate_generation_batch,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
     )
-    
     val_loader = DataLoader(
         val_dataset,
         batch_size=effective_batch_size,
         shuffle=False,
-        collate_fn=collate_instruction_batch,
-        num_workers=0,  # Disable multiprocessing to avoid deadlock
-        pin_memory=False
+        sampler=val_sampler,
+        collate_fn=collate_generation_batch,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
     )
-    
     return train_loader, val_loader
 
 def load_data_from_files(train_file, val_file, tokenizer, args):
