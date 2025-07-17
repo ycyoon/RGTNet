@@ -7,9 +7,9 @@ echo "🚀 Starting RGTNet DDP training with benchmark evaluation..."
 # 2개의 GPU를 사용하여 DDP로 main.py 실행
 # batch_size 1, gradient_accumulation_steps 8 -> 실질적인 배치 크기 1*2*8=16
 # --use_amp : 메모리 절약을 위해 Automatic Mixed Precision 사용
-torchrun --nproc_per_node=2 main.py \
+torchrun --nproc_per_node=8 main.py \
     --pretrained_model_name meta-llama/Meta-Llama-3-8B \
-    --epochs 5 \
+    --epochs 1 \
     --batch_size 1 \
     --gradient_accumulation_steps 8 \
     --use_amp \

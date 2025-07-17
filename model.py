@@ -6,6 +6,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 import math
 import os
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 # -------------------- Core Model Definitions --------------------
 
@@ -62,7 +63,7 @@ class RoleGatedSelfAttention(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.delta = nn.Parameter(torch.tensor(delta))
+        self.delta = nn.Parameter(torch.tensor([delta]))
         
         # Orthogonal matrix for rotation
         self.register_buffer("U", _create_stacked_orthogonal_matrices(self.nhead, self.head_dim))
@@ -92,7 +93,7 @@ class RoleGatedSelfAttention(nn.Module):
             rotated_k_part = torch.matmul(k_reshaped, U_batch)
 
             # Explicitly expand role_gate to match k_reshaped's dimensions for broadcasting
-            role_gate = torch.sigmoid(self.delta * (role_mask.float() - 0.5))
+            role_gate = torch.sigmoid(self.delta[0] * (role_mask.float() - 0.5))
             role_gate = role_gate.unsqueeze(1).unsqueeze(-1).expand(-1, self.nhead, -1, self.head_dim)
 
             # Perform the final computation in-place on k_reshaped
@@ -145,7 +146,7 @@ class RoleAwareTransformerLayer(nn.Module):
 
 class CheckpointedRoleAwareTransformerLayer(RoleAwareTransformerLayer):
     def forward(self, src, role_mask, src_mask=None, src_key_padding_mask=None):
-        return checkpoint(super().forward, src, role_mask, src_mask, src_key_padding_mask)
+        return checkpoint(super().forward, src, role_mask, src_mask, src_key_padding_mask, use_reentrant=False)
 
 class RoleAwareTransformerDecoder(nn.Module):
     """
@@ -255,8 +256,8 @@ def create_model(args, tokenizer):
 
 def save_checkpoint(model, optimizer, epoch, save_path):
     """Save model checkpoint."""
-    if isinstance(model, nn.DataParallel) or isinstance(model, nn.parallel.DistributedDataParallel):
-        model_state_dict = model.module.state_dict()
+    if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel, FSDP)):
+        model_state_dict = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
     else:
         model_state_dict = model.state_dict()
     

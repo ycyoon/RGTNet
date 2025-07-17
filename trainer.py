@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import json
 import time
 from tqdm import tqdm
@@ -66,7 +66,7 @@ def train_model(model, train_loader, val_loader, device, args):
     scheduler = LambdaLR(optimizer, lr_lambda)
     
     # Initialize GradScaler for AMP
-    scaler = GradScaler(enabled=args.use_amp)
+    scaler = GradScaler(enabled=args.use_amp) if torch.cuda.is_available() else None
     
     model.train()
     best_val_loss = float('inf')
@@ -97,7 +97,7 @@ def train_model(model, train_loader, val_loader, device, args):
             role_mask = batch['role_mask'].to(device)
             
             # AMP: autocast context manager
-            with autocast(enabled=args.use_amp):
+            with autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
                 outputs = model(input_ids=input_ids, role_mask=role_mask, labels=labels)
                 loss = outputs['loss']
                 if loss.dim() > 0:
@@ -107,13 +107,19 @@ def train_model(model, train_loader, val_loader, device, args):
                 loss = loss / args.gradient_accumulation_steps
 
             # Backward pass
-            scaler.scale(loss).backward()
+            if scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             # Update weights
             if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+                if scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
 
             total_loss += loss.item() * args.gradient_accumulation_steps # Unscale for logging

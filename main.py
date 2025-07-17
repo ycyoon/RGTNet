@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 # Import our modules
 from config import setup_args, setup_environment, get_device, create_directories
-from model import create_model
+from model import create_model, CheckpointedRoleAwareTransformerLayer
 from data_loader import download_instruction_datasets, create_data_loaders, load_data_from_files, GenerationDataset
 from trainer import train_model
 from evaluator import evaluate_model_detailed, save_evaluation_results, print_evaluation_summary
@@ -19,14 +19,12 @@ import torch.nn as nn
 import torch.nn.parallel
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from functools import partial
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, CPUOffload
 from torch.utils.data.distributed import DistributedSampler
 
-print(f"[DEBUG] RANK={os.environ.get('RANK')}, LOCAL_RANK={os.environ.get('LOCAL_RANK')}, CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
-import torch
-print(f"[DEBUG] torch.cuda.device_count()={torch.cuda.device_count()}")
-
-print(f"[DEBUG] sys.argv={sys.argv}")
-print(f"[DEBUG] __name__={__name__}")
 
 def main():
     """Main execution function"""
@@ -46,6 +44,11 @@ def main():
         
         torch.cuda.set_device(local_rank)
         device = torch.device(f'cuda:{local_rank}')
+        # Limit initial reserved memory to reduce fragmentation
+        try:
+            torch.cuda.set_per_process_memory_fraction(0.9, device)
+        except AttributeError:
+            pass  # Older PyTorch versions may not have this API
         
         dist.init_process_group(
             backend='nccl',
@@ -58,6 +61,12 @@ def main():
     else:
         # non-DDP case
         device = get_device(args)
+        # Limit initial reserved memory in single-GPU case as well
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.set_per_process_memory_fraction(0.9, device)
+            except AttributeError:
+                pass
         rank = 0
         local_rank = 0
     
@@ -86,7 +95,17 @@ def main():
         print_model_info(model)
     model = model.to(device)
     if is_ddp:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        # Configure FSDP with full sharding and mixed precision
+        mp_policy = MixedPrecision(param_dtype=torch.float16, reduce_dtype=torch.float16, buffer_dtype=torch.float16)
+        auto_wrap_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={CheckpointedRoleAwareTransformerLayer})
+        model = FSDP(
+            model,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            auto_wrap_policy=auto_wrap_policy,
+            mixed_precision=mp_policy,
+            cpu_offload=CPUOffload(offload_params=True),
+            device_id=device
+        )
     
     # Data preparation
     train_data, val_data = None, None

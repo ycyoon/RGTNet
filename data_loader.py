@@ -67,40 +67,40 @@ def download_instruction_datasets():
     
     # Try multiple datasets with error handling
     datasets_to_try = [
-        # {
-        #     'name': 'Alpaca',
-        #     'id': 'tatsu-lab/alpaca',
-        #     'samples': 10000
-        # },
-        # {
-        #     'name': 'OpenAssistant Conversations',
-        #     'id': 'OpenAssistant/oasst1',
-        #     'samples': 8000
-        # },
+        {
+            'name': 'Alpaca',
+            'id': 'tatsu-lab/alpaca',
+            'samples': 10000
+        },
+        {
+            'name': 'OpenAssistant Conversations',
+            'id': 'OpenAssistant/oasst1',
+            'samples': 8000
+        },
         {
             'name': 'Databricks Dolly',
             'id': 'databricks/databricks-dolly-15k',
             'samples': 7000
         },
-        # {
-        #     'name': 'Stanford Human Preferences',
-        #     'id': 'Anthropic/hh-rlhf',
-        #     'samples': 5000
-        # },
-        # {
-        #     'name': 'WizardLM Evol Instruct',
-        #     'id': 'WizardLM/WizardLM_evol_instruct_70k',
-        #     'samples': 5000
-        # }
+        {
+            'name': 'Stanford Human Preferences',
+            'id': 'Anthropic/hh-rlhf',
+            'samples': 5000
+        },
+        {
+            'name': 'WizardLM Evol Instruct',
+            'id': 'WizardLM/WizardLM_evol_instruct_70k',
+            'samples': 5000
+        }
     ]
     
     for dataset_info in datasets_to_try:
         try:
             print(f"Loading {dataset_info['name']} dataset...")
             dataset = load_dataset(dataset_info['id'], split="train")
-            # sample_count = min(len(dataset), dataset_info['samples'])
+            sample_count = min(len(dataset), dataset_info['samples'])
+            dataset = dataset.select(range(sample_count))
             # all_data.extend(dataset[:sample_count])
-            # 전체 데이터 사용 (Dataset, DatasetDict, IterableDataset 모두 지원)
             if hasattr(dataset, 'keys') and 'train' in dataset:
                 # DatasetDict인 경우 train split만 사용
                 split_data = dataset['train']
