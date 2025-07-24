@@ -1,0 +1,68 @@
+{
+    "folders": [
+        {
+            "name": "RGTNet",
+            "path": "."
+        }
+    ],
+    "settings": {
+        "github.copilot.enable": {
+            "*": true,
+            "yaml": true,
+            "plaintext": true,
+            "markdown": true,
+            "python": true,
+            "json": true,
+            "jsonl": true,
+            "sh": true
+        },
+        
+        "python.defaultInterpreterPath": "./venv/bin/python",
+        "python.terminal.activateEnvironment": true,
+        "python.analysis.extraPaths": [
+            "./",
+            "./StructTransformBench"
+        ],
+        
+        "github.actions.workflows.pinned.workflows": [
+            ".github/workflows/test.yml",
+            ".github/workflows/build.yml"
+        ],
+        
+        "explorer.fileNesting.enabled": true,
+        "explorer.fileNesting.patterns": {
+            "*.py": "${capture}.pyc",
+            "requirements.txt": "requirements-*.txt",
+            "config.py": "config.yaml",
+            "*.sh": "${capture}.log"
+        }
+    },
+    
+    "extensions": {
+        "recommendations": [
+            "github.copilot",
+            "github.copilot-chat",
+            "ms-python.python",
+            "ms-toolsai.jupyter",
+            "eamodio.gitlens"
+        ]
+    },
+    
+    "tasks": {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "Setup Development Environment",
+                "type": "shell",
+                "command": "python -m venv venv && source venv/bin/activate && pip install -r requirements.txt",
+                "group": "build",
+                "presentation": {
+                    "echo": true,
+                    "reveal": "always",
+                    "focus": false,
+                    "panel": "shared"
+                }
+            }
+        ]
+    }
+}
