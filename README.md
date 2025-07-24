@@ -14,13 +14,45 @@ The RGTNet implementation includes:
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Setup Visual Studio Code with GitHub Pro+ (Recommended)
+
+This repository is optimized for Visual Studio Code with GitHub Pro+ features including GitHub Copilot.
+
+#### Prerequisites
+- Visual Studio Code installed
+- GitHub Pro+ subscription with Copilot access
+- Git configured with your GitHub account
+
+#### Setup Steps
+1. **Open in VS Code**:
+   ```bash
+   code RGTNet.code-workspace
+   ```
+   Or open the folder directly in VS Code.
+
+2. **Install recommended extensions**:
+   VS Code will prompt to install recommended extensions. Accept to install:
+   - GitHub Copilot & Copilot Chat (requires GitHub Pro+)
+   - Python extension pack
+   - GitLens for advanced Git features
+   - Jupyter for notebook support
+
+3. **Sign in to GitHub**:
+   - Press `Ctrl+Shift+P` and run "GitHub: Sign in"
+   - Authenticate with your GitHub Pro+ account
+   - Verify Copilot is activated in the status bar
+
+4. **Setup Python environment**:
+   - Use `F1` → "Python: Select Interpreter" to choose your Python interpreter
+   - Or run the "Setup Development Environment" task from the Command Palette
+
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Quick Training (Recommended for Testing)
+### 3. Quick Training (Recommended for Testing)
 
 ```bash
 python train_instruction.py --quick
@@ -31,7 +63,7 @@ This will:
 - Train a small model (256 dim, 3 layers) for quick testing
 - Save the trained model and results
 
-### 3. Full Training (Recommended Settings)
+### 4. Full Training (Recommended Settings)
 
 ```bash
 python train_instruction.py --full
@@ -43,11 +75,74 @@ This will:
 - Train with paper-recommended settings (512 dim, 6 layers, 3 epochs)
 - Save the trained model and results
 
-### 4. Manual Training
+### 5. Manual Training
 
 ```bash
 python main.py --download_datasets --epochs 3 --batch_size 16 --lr 5e-5
 ```
+
+## Visual Studio Code Integration
+
+This repository includes comprehensive VS Code configuration to maximize your productivity with GitHub Pro+ features.
+
+### GitHub Pro+ Features Available
+
+1. **GitHub Copilot Integration**:
+   - Code completion and suggestions for Python ML code
+   - Copilot Chat for explaining complex transformer architectures
+   - Inline suggestions optimized for PyTorch and ML patterns
+
+2. **Advanced Git Features**:
+   - GitLens for code history and blame annotations
+   - GitHub Pull Request integration
+   - Repository insights and analytics
+
+3. **Debugging Configuration**:
+   - Pre-configured launch configurations for training scripts
+   - Debug profiles for quick testing, full training, and evaluation
+   - Integrated terminal with proper environment setup
+
+### VS Code Tasks Available
+
+Access these via `Ctrl+Shift+P` → "Tasks: Run Task":
+
+- **Install Dependencies**: Automatically install requirements.txt
+- **Quick Train**: Run quick training with optimized settings
+- **Full Train**: Run full training with paper settings
+- **Setup Benchmark**: Initialize StructTransform benchmark
+- **Format Code**: Apply Black formatting
+- **Lint Code**: Run flake8 linting
+- **Clean Cache**: Remove Python cache files
+
+### Workspace Features
+
+- **File Nesting**: Organized view of related files (*.py with *.pyc, etc.)
+- **Smart Search**: Excludes data/, models/, and cache directories
+- **Python Integration**: Auto-detection of virtual environments
+- **Jupyter Support**: Built-in notebook support for experimentation
+
+### Troubleshooting VS Code Setup
+
+1. **GitHub Copilot not working**:
+   ```bash
+   # Check authentication
+   # In VS Code: Ctrl+Shift+P → "GitHub: Sign in"
+   # Verify Pro+ subscription in GitHub settings
+   ```
+
+2. **Python interpreter not found**:
+   ```bash
+   # In VS Code: Ctrl+Shift+P → "Python: Select Interpreter"
+   # Choose the correct Python path (e.g., /usr/bin/python or venv/bin/python)
+   ```
+
+3. **Extensions not installing**:
+   ```bash
+   # Manually install key extensions:
+   code --install-extension github.copilot
+   code --install-extension ms-python.python
+   code --install-extension eamodio.gitlens
+   ```
 
 ## Dataset Information
 
@@ -166,6 +261,12 @@ RGTNet/
 ├── setup_benchmark.sh        # StructTransform benchmark setup
 ├── README.md                 # This file
 ├── config.yaml              # Configuration file
+├── RGTNet.code-workspace     # VS Code workspace configuration
+├── .vscode/                  # VS Code configuration directory
+│   ├── settings.json         # Python and GitHub Pro+ settings
+│   ├── launch.json          # Debugging configurations
+│   ├── tasks.json           # Development tasks
+│   └── extensions.json      # Recommended extensions
 ├── data/                    # Downloaded datasets
 │   ├── train_instruction.jsonl
 │   ├── val_instruction.jsonl
@@ -232,6 +333,33 @@ If you use this implementation in your research, please cite:
   year={2024}
 }
 ```
+
+## 한국어 사용자를 위한 VS Code 설정 가이드
+
+GitHub Pro+ 구독을 Visual Studio Code에서 최대한 활용하기 위한 설정이 포함되어 있습니다.
+
+### GitHub Pro+ 기능 활용하기
+
+1. **GitHub Copilot 설정**:
+   - `Ctrl+Shift+P` → "GitHub: Sign in"으로 GitHub 계정에 로그인
+   - 상태바에서 Copilot이 활성화되었는지 확인
+   - Pro+ 구독이 활성화되어 있는지 GitHub 설정에서 확인
+
+2. **VS Code에서 프로젝트 열기**:
+   ```bash
+   code RGTNet.code-workspace
+   ```
+
+3. **권장 확장 프로그램 설치**:
+   - GitHub Copilot (Pro+ 구독 필요)
+   - Python 확장 팩
+   - GitLens
+   - Jupyter
+
+### 문제 해결
+
+- **Copilot이 작동하지 않는 경우**: GitHub 계정 재로그인 후 Pro+ 구독 상태 확인
+- **Python 인터프리터를 찾을 수 없는 경우**: `F1` → "Python: Select Interpreter"에서 올바른 Python 경로 선택
 
 ## License
 
