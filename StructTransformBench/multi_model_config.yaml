@@ -1,0 +1,32 @@
+attack_settings:
+  combination_modes:
+  - false
+  - true
+  max_queries: 10
+  parallel_models: false
+  structures:
+  - JSON
+  - SQL
+  - Cypher
+  - SymLogix
+  test_mode: true
+  timeout_per_model: 3600
+evaluators:
+  attack_model:
+    model_name: dummy
+    port: 9999
+  eval_model:
+    model_name: cais/HarmBench-Llama-2-13b-cls
+    port: 8001
+  refusal_eval_model:
+    model_name: allenai/wildguard
+    port: 8002
+models_to_test:
+- llama-3.2-1b
+- llama-3.2-3b
+- llama-3.1-8b
+- qwen-2.5-7b
+server_settings:
+  auto_start_servers: false
+  base_url_template: http://localhost:{port}/v1
+  check_server_health: true

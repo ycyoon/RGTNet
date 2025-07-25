@@ -1,0 +1,54 @@
+# Define the models and their configuration
+models:
+  target:
+    model_name: "anthropic/claude-3.5-sonnet"
+    base_url: "https://openrouter.ai/api/v1/"
+    api_key_env: "OPENROUTER_API_KEY"
+    generation_config:
+      temperature: 0.0
+      max_tokens: 1024
+
+  # NOT need if only running benchmark tests, replace if using attack generation
+  attack:
+    model_name: "dummy model"
+    base_url: "https://www.dummy.com/"
+    api_key_env: "DEEPSEEK_PLATFORM_API_KEY"
+    generation_config:
+      temperature: 1
+      top_p: 0.9
+      max_tokens: 1024
+
+  eval:
+    model_name: "cais/HarmBench-Llama-2-13b-cls"
+    base_url: "http://localhost:9200/v1"
+    api_key_env: "EMPTY"
+    generation_config:
+      # Do NOT change
+      temperature: 0.0
+      max_tokens: 1
+
+  refusal_eval:
+    model_name: "allenai/wildguard"
+    base_url: "http://localhost:9201/v1"
+    api_key_env: "EMPTY"
+    generation_config:
+      # Do NOT change
+      temperature: 0.0
+      max_tokens: 20
+
+
+attack_settings:
+  # 1 = use hex encoding for more capable models
+  # 2 = use url encoding for smaller models
+  combination_mode: 2
+
+structures:
+  # Comment out the structures you don't want included in test
+  JSON: "benchmark/json_dataset.pkl"
+  SQL: "benchmark/sql_dataset.pkl"
+  Cypher: "benchmark/cypher_dataset.pkl"
+  SymLogix: "benchmark/symlogix_dataset.pkl"
+
+paths:
+  # path where the results should be saved
+  save_path: "benchmark_results/claude-3.5-sonnet"

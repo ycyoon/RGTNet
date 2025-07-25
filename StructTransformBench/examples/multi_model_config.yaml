@@ -1,0 +1,51 @@
+models_to_test:
+  - "llama-3.2-1b"
+  - "llama-3.2-3b"  # Remove Qwen for now to avoid meta tensor issues
+
+evaluators:
+  eval_model:
+    model_name: "microsoft/DialoGPT-small"  # Faster small model for testing
+    port: 8001
+    use_local: true
+  refusal_eval_model:
+    model_name: "unitary/toxic-bert"  # Faster classification model
+    port: 8002
+    use_local: true
+  attack_model:
+    model_name: "dummy"
+    port: 9999
+
+attack_settings:
+  max_queries: 5  # Reduced for faster testing
+  test_mode: true
+  combination_modes: [false]  # Test only basic mode
+  parallel_models: false  # Disable parallel for debugging
+  structures: ["JSON"]  # Test only JSON for debugging
+  timeout_per_model: 3600  # 모델당 최대 실행 시간 (초)
+  batch_attack: true
+  attack_batch_size: 8  # Smaller batch size for debugging
+
+server_settings:
+  use_local_models: true  # Use local models by default
+  check_server_health: false  # Disable health checks for local mode
+  skip_unavailable_models: "always"  # Skip if model can't be loaded
+  auto_start_servers: false  # 서버 자동 시작 (구현 예정)
+  base_url_template: "http://localhost:{port}/v1"  # 서버 URL 템플릿
+  retry_attempts: 3
+  retry_delay: 5
+
+local_model_settings:
+  cache_dir: null  # Use default HF cache
+  offload_folder: "./offload"
+  quantization: "auto"  # "auto", "8bit", "4bit", or None
+  max_memory: null  # e.g., {0: "20GB", "cpu": "50GB"}
+  device: "auto"  # "cuda", "cpu", or "auto"
+  torch_dtype: "float16"  # Use float16 for better performance
+  use_flash_attention: true  # Enable flash attention if available
+
+# 실험 설정
+experiment:
+  name: "foundation_model_robustness_evaluation"
+  description: "다양한 foundation 모델의 구조화된 공격에 대한 견고성 평가"
+  save_detailed_logs: true
+  generate_plots: true

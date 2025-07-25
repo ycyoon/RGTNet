@@ -1,0 +1,49 @@
+models:
+  target:
+    model_name: "meta-llama/Llama-3.2-3B-Instruct"
+    base_url: "http://localhost:8000/v1"
+    api_key_env: "EMPTY"
+    generation_config:
+      temperature: 0.0
+      max_tokens: 512
+      top_p: 1.0
+  
+  # NOT need if only running benchmark tests, using pre-generated attacks
+  attack:
+    model_name: "dummy model"
+    base_url: "https://www.dummy.com/"
+    api_key_env: "EMPTY"
+    generation_config:
+      temperature: 1
+      top_p: 0.9
+      max_tokens: 1024
+  
+  eval:
+    model_name: "cais/HarmBench-Llama-2-13b-cls"
+    base_url: "http://localhost:8001/v1"
+    api_key_env: "EMPTY"
+    generation_config:
+      temperature: 0.0
+      max_tokens: 512
+  
+  refusal_eval:
+    model_name: "allenai/wildguard"
+    base_url: "http://localhost:8002/v1"
+    api_key_env: "EMPTY"
+    generation_config:
+      temperature: 0.0
+      max_tokens: 512
+
+structures:
+  JSON_ID: "../benchmark/json_dataset.pkl"
+  SQL_ID: "../benchmark/sql_dataset.pkl"
+  Cypher_ID: "../benchmark/cypher_dataset.pkl"
+  SymLogix_ID: "../benchmark/symlogix_dataset.pkl"
+
+paths:
+  save_path: "./llama32_benchmark_results"
+
+attack_settings:
+  combination_mode: 1
+  max_queries: 50  # 테스트용으로 제한
+  test_mode: true

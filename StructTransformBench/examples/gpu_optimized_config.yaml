@@ -1,0 +1,50 @@
+# GPU-optimized configuration for multi-model benchmark
+
+models_to_test:
+  - llama-3.2-1b
+  - llama-3.2-3b
+  - llama-3.1-8b
+  - qwen-2.5-7b
+
+evaluators:
+  eval_model:
+    model_name: cais/HarmBench-Llama-2-13b-cls
+    port: 8001
+    use_local: true
+  refusal_eval_model:
+    model_name: allenai/wildguard
+    port: 8002
+    use_local: true
+  attack_model:
+    model_name: dummy
+    port: 9999
+
+attack_settings:
+  max_queries: 100  # Increase for better GPU utilization
+  test_mode: false
+  combination_modes: [false, true]
+  parallel_models: false
+  structures: ["JSON", "SQL", "Cypher", "SymLogix"]
+  timeout_per_model: 3600
+  batch_attack: true
+  attack_batch_size: 64  # Larger batch size
+
+server_settings:
+  use_local_models: true
+  check_server_health: false
+  skip_unavailable_models: always
+  auto_start_servers: false
+  base_url_template: "http://localhost:{port}/v1"
+  retry_attempts: 3
+  retry_delay: 5
+
+local_model_settings:
+  cache_dir: null
+  offload_folder: "./offload"
+  quantization: null  # Disable quantization for better performance
+  max_memory: null
+  device: cuda  # Force CUDA
+  torch_dtype: float16  # Use FP16 for speed
+  use_flash_attention: true
+  use_better_transformer: true
+  gradient_checkpointing: false  # Disable for inference speed
