@@ -5,30 +5,123 @@ import json
 import os
 from pathlib import Path
 
+class InstructionDataset(Dataset):
+    def __init__(self, data, tokenizer, max_length=512):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        # Store the actual vocabulary size to use for validation
+        self.vocab_size = len(tokenizer)
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        instruction = item.get('instruction', '')
+        input_text = item.get('input', '')
+        output = item.get('output', '')
+        
+        # Format: instruction + input (if exists) -> output
+        if input_text:
+            prompt = f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
+        else:
+            prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
+        
+        full_text = prompt + output + self.tokenizer.eos_token
+        
+        # Tokenize
+        encoding = self.tokenizer(
+            full_text, 
+            truncation=True, 
+            padding='max_length', 
+            max_length=self.max_length, 
+            return_tensors='pt'
+        )
+        input_ids = encoding['input_ids'].squeeze()
+        attention_mask = encoding['attention_mask'].squeeze()
+        
+        # Critical: Comprehensive token validation to prevent CUDA indexing errors
+        vocab_size = self.vocab_size
+        
+        # Step 1: Clamp all tokens to valid range
+        input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
+        
+        # Step 2: Additional validation with detailed logging
+        if torch.any(input_ids >= vocab_size) or torch.any(input_ids < 0):
+            print(f"Warning: Found invalid token IDs after clamping. Min: {input_ids.min().item()}, Max: {input_ids.max().item()}, Vocab size: {vocab_size}")
+            # Force clamp again as safety measure
+            input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
+        
+        # Step 3: Final validation
+        assert input_ids.min().item() >= 0, f"Negative token ID found: {input_ids.min().item()}"
+        assert input_ids.max().item() < vocab_size, f"Token ID {input_ids.max().item()} >= vocab_size {vocab_size}"
+        
+        labels = input_ids.clone()
+        
+        # Mask the prompt part for loss calculation (only train on response)
+        prompt_encoding = self.tokenizer(
+            prompt, 
+            truncation=True, 
+            padding='max_length', 
+            max_length=self.max_length, 
+            return_tensors='pt'
+        )
+        prompt_len = (prompt_encoding['attention_mask'].squeeze() == 1).sum().item()
+        
+        # Set labels to -100 for prompt tokens (ignore in loss)
+        if prompt_len < self.max_length:
+            labels[:prompt_len] = -100
+        
+        return {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'labels': labels
+        }
+
 class GenerationDataset(Dataset):
     def __init__(self, data, tokenizer, max_length=512, num_roles=2):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.num_roles = num_roles
+        # Store the actual vocabulary size to use for validation
+        self.vocab_size = len(tokenizer)  # Use len() for consistency with model
     def __len__(self):
         return len(self.data)
     def __getitem__(self, idx):
         item = self.data[idx]
         prompt = item.get('instruction', '')
         output = item.get('output', '')
+        
+        # Safe handling of eos_token
+        eos_token = self.tokenizer.eos_token if self.tokenizer.eos_token is not None else ''
+        
         # 프롬프트와 정답을 이어붙여 causal LM 학습
-        full_text = prompt + self.tokenizer.eos_token + output + self.tokenizer.eos_token
+        full_text = prompt + eos_token + output + eos_token
         encoding = self.tokenizer(full_text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
         input_ids = encoding['input_ids'].squeeze()
-        # input_ids가 vocab_size 이상인 경우 unk_token_id로 대체
-        unk_token_id = self.tokenizer.unk_token_id if self.tokenizer.unk_token_id is not None else 0
-        input_ids[input_ids >= self.tokenizer.vocab_size] = unk_token_id
-        # assert input_ids.max().item() < self.tokenizer.vocab_size, f"input_ids max {input_ids.max().item()} >= vocab_size {self.tokenizer.vocab_size}"
+        
+        # Critical: Comprehensive token validation to prevent CUDA indexing errors
+        vocab_size = self.vocab_size  # Use stored vocab_size for consistency
+        
+        # Step 1: Clamp all tokens to valid range
+        input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
+        
+        # Step 2: Additional validation with detailed logging
+        if torch.any(input_ids >= vocab_size) or torch.any(input_ids < 0):
+            print(f"Warning: Found invalid token IDs after clamping. Min: {input_ids.min().item()}, Max: {input_ids.max().item()}, Vocab size: {vocab_size}")
+            # Force clamp again as safety measure
+            input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
+        
+        # Step 3: Final validation
+        assert input_ids.min().item() >= 0, f"Negative token ID found: {input_ids.min().item()}"
+        assert input_ids.max().item() < vocab_size, f"Token ID {input_ids.max().item()} >= vocab_size {vocab_size}"
+        
         labels = input_ids.clone()
         # 역할 정보: instruction 부분은 0(user), output 부분은 1(assistant)로 마킹
         # 간단하게 prompt 길이까지 0, 그 이후 1로 설정
-        prompt_encoding = self.tokenizer(prompt + self.tokenizer.eos_token, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
+        prompt_encoding = self.tokenizer(prompt + eos_token, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
         prompt_len = (prompt_encoding['attention_mask'].squeeze() == 1).sum().item()
         role_mask = torch.zeros(self.max_length, dtype=torch.long)
         if prompt_len < self.max_length:
@@ -42,6 +135,12 @@ def collate_generation_batch(batch):
     labels = torch.stack([item['labels'] for item in batch])
     role_mask = torch.stack([item['role_mask'] for item in batch])
     return {'input_ids': input_ids, 'labels': labels, 'role_mask': role_mask}
+
+def collate_instruction_batch(batch):
+    input_ids = torch.stack([item['input_ids'] for item in batch])
+    attention_mask = torch.stack([item['attention_mask'] for item in batch])
+    labels = torch.stack([item['labels'] for item in batch])
+    return {'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels}
 
 def pad_to_multiple(data, multiple):
     n = len(data)

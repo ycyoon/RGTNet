@@ -29,10 +29,21 @@ from tqdm import tqdm
 import yaml
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import time
 
 # Import RGTNet model components
 from model import create_model
 
+
+def load_judge_model(model_name, device):
+    """Safely load judge models to a specific device."""
+    print(f"Loading judge model: {model_name} on device: {device}")
+    # For large models, we might need to be careful with memory
+    model_kwargs = {"low_cpu_mem_usage": True} if device == "cpu" else {}
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
+    model.eval()
+    print(f"✅ {model_name} loaded successfully.")
+    return model
 
 @dataclass
 class EvaluationConfig:
@@ -163,18 +174,32 @@ class RefusalJudge:
 
 class StructTransformEvaluator:
     """Evaluator for StructTransform benchmark (논문 방식, Refusal Judge 포함)"""
-    def __init__(self, model, tokenizer, device, config: EvaluationConfig, judge_model_name=None, refusal_model_name=None):
+    def __init__(self, model, tokenizer, device, config: EvaluationConfig, judge_model_name=None, refusal_model_name=None, judge_device="cpu"):
+        """device: device for the model; judge_device: device for heavy judge models (default CPU)"""
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.config = config
-        self.judge = HarmBenchJudge(judge_model_name or "cais/HarmBench-Llama-2-13b-cls", device)
-        self.refusal = RefusalJudge(refusal_model_name or "allenai/wildguard", device)
+        self.judge = HarmBenchJudge(judge_model_name or "cais/HarmBench-Llama-2-13b-cls", judge_device)
+        self.refusal = RefusalJudge(refusal_model_name or "allenai/wildguard", judge_device)
         self.model.eval()
+
+    def cleanup(self):
+        """Explicitly release memory used by judge models."""
+        print("Cleaning up judge models from memory...")
+        del self.judge
+        del self.refusal
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("✅ Cleanup complete.")
+
     def generate_response(self, prompt: str, max_new_tokens=128):
+        # Ensure model is on the right device for generation
+        model = self.model.module if hasattr(self.model, 'module') else self.model
+        model.to(self.device)
+
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
         with torch.no_grad():
-            model = self.model.module if hasattr(self.model, 'module') else self.model
             output_ids = model.generate(input_ids, max_new_tokens=max_new_tokens)
         response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
         return response
@@ -187,6 +212,8 @@ class StructTransformEvaluator:
         query_efficiency_sum = 0
         refusal_count = 0
         total_attempts = 0
+        judge_elapsed = 0.0
+        refusal_elapsed = 0.0
         sample_outputs = []
         # group by original_query
         from collections import defaultdict
@@ -201,8 +228,13 @@ class StructTransformEvaluator:
                 response = self.generate_response(prompt)
                 attempts += 1
                 total_attempts += 1
+                start_t = time.perf_counter()
                 is_harmful = self.judge.is_harmful(response)
+                judge_elapsed += time.perf_counter() - start_t
+
+                start_t = time.perf_counter()
                 is_refusal = self.refusal.is_refusal(response)
+                refusal_elapsed += time.perf_counter() - start_t
                 if is_refusal:
                     refusal_count += 1
                 if is_harmful:
@@ -224,6 +256,9 @@ class StructTransformEvaluator:
         QueryEfficiency = query_efficiency_sum / asr_numerator if asr_numerator > 0 else 0
         RefusalRate = refusal_count / total_attempts if total_attempts > 0 else 0
         print(f"ASR: {ASR:.4f}, QueryEfficiency: {QueryEfficiency:.2f}, RefusalRate: {RefusalRate:.4f}")
+        avg_judge_latency = judge_elapsed / total_attempts if total_attempts > 0 else 0
+        avg_refusal_latency = refusal_elapsed / total_attempts if total_attempts > 0 else 0
+        print(f"Average Judge latency: {avg_judge_latency:.3f}s, Refusal latency: {avg_refusal_latency:.3f}s")
         return {
             'structure': structure_name,
             'ASR': ASR,
@@ -231,7 +266,9 @@ class StructTransformEvaluator:
             'RefusalRate': RefusalRate,
             'sample_outputs': sample_outputs,
             'total_queries': asr_denominator,
-            'total_attempts': total_attempts
+            'total_attempts': total_attempts,
+            'avg_judge_latency_sec': avg_judge_latency,
+            'avg_refusal_latency_sec': avg_refusal_latency
         }
     def evaluate_all_structures(self) -> dict:
         print("="*80)

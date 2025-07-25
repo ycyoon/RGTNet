@@ -7,51 +7,14 @@ import json
 import time
 from tqdm import tqdm
 import os
+import torch.distributed as dist
+from model import load_checkpoint
 
-def run_benchmark_evaluation(model, head, tokenizer, device, args, epoch):
-    """Run StructTransform benchmark evaluation during training (논문 방식: HarmBench judge + Refusal judge)"""
-    try:
-        from structtransform_benchmark import StructTransformEvaluator, EvaluationConfig, StructTransformDataset
-        import os
-        # Create benchmark config
-        benchmark_config = EvaluationConfig(
-            model_path="",  # Not needed for evaluation during training
-            d_model=args.d_model,
-            nhead=args.nhead,
-            num_layers=args.num_layers,
-            max_seq_len=args.max_seq_len,
-            dropout=args.dropout,
-            tokenizer_name=args.tokenizer_name,
-            bias_delta=args.bias_delta,
-            batch_size=8,  # Smaller batch size for faster evaluation
-            device=device,
-            benchmark_dir=args.benchmark_dir if hasattr(args, 'benchmark_dir') else "StructTransformBench/benchmark"
-        )
-        # 논문 방식 evaluator (HarmBench judge + Refusal judge)
-        evaluator = StructTransformEvaluator(model, tokenizer, device, benchmark_config)
-        print(f"\n{'='*60}")
-        print(f"BENCHMARK EVALUATION (논문 방식, HarmBench judge + Refusal judge) - Epoch {epoch+1}")
-        print(f"{'='*60}")
-        # 빠른 평가를 위해 대표 구조만 사용하거나 전체 구조 평가
-        results = evaluator.evaluate_all_structures()
-        # Save intermediate results
-        benchmark_results = {
-            'epoch': epoch + 1,
-            'results': results,
-            'timestamp': time.time()
-        }
-        benchmark_file = f"benchmark_results_epoch_{epoch+1}_full.json"
-        with open(benchmark_file, 'w') as f:
-            import json
-            json.dump(benchmark_results, f, indent=2)
-        print(f"Benchmark results saved to {benchmark_file}")
-        print(f"{'='*60}\n")
-        return benchmark_results
-    except Exception as e:
-        print(f"⚠️  Benchmark evaluation failed: {e}")
-        return None
 
-def train_model(model, train_loader, val_loader, device, args):
+def is_main_process():
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+def train_model(model, train_loader, val_loader, device, args, local_rank=0, logger=None):
     """Train the decoder-only (causal LM) model"""
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
@@ -78,10 +41,31 @@ def train_model(model, train_loader, val_loader, device, args):
         'benchmark_results': []
     }
     
-    print(f"Starting training for {args.epochs} epochs...")
-    benchmark_freq = getattr(args, 'benchmark_freq', 5)
+    start_epoch = 0
+    if getattr(args, 'resume', False) and os.path.exists(args.save_path):
+        try:
+            # Pass is_main_process() to prevent duplicate logging
+            start_epoch = load_checkpoint(model, optimizer, args.save_path, device, is_main_process())
+            if is_main_process():
+                print(f"Resuming training from epoch {start_epoch}...")
+        except Exception as e:
+            if is_main_process():
+                print(f"⚠️  Failed to load checkpoint for resuming: {e}. Starting from scratch.")
+            start_epoch = 0
+
+    # Adjust total_steps and scheduler if resuming to ensure LR warmup continues correctly
+    if start_epoch > 0:
+        completed_steps = (len(train_loader) // args.gradient_accumulation_steps) * start_epoch
+        scheduler.last_epoch = completed_steps - 1  # set to last finished step
     
-    for epoch in range(args.epochs):
+    if is_main_process():
+        print(f"Starting training for {args.epochs} epochs...")
+        if logger:
+            logger.info(f"Starting training for {args.epochs} epochs...")
+            logger.info(f"Learning rate: {args.lr}, Batch size: {args.batch_size}")
+            logger.info(f"Model parameters: d_model={args.d_model}, nhead={args.nhead}, num_layers={args.num_layers}")
+    
+    for epoch in range(start_epoch, args.epochs):
         if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
         
@@ -89,9 +73,16 @@ def train_model(model, train_loader, val_loader, device, args):
         total_loss = 0
         num_batches = 0
         
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", disable=not is_main_process())
         
+        should_break_epoch = False
         for batch_idx, batch in enumerate(progress_bar):
+            if hasattr(args, 'max_iters') and args.max_iters is not None and batch_idx >= args.max_iters:
+                if is_main_process():
+                    print(f"Reached max_iters ({args.max_iters}), stopping training for this epoch.")
+                should_break_epoch = True
+                break
+
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             role_mask = batch['role_mask'].to(device)
@@ -125,7 +116,7 @@ def train_model(model, train_loader, val_loader, device, args):
             total_loss += loss.item() * args.gradient_accumulation_steps # Unscale for logging
             num_batches += 1
             
-            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0 and is_main_process():
                 progress_bar.set_postfix({
                     'loss': f'{loss.item() * args.gradient_accumulation_steps:.4f}',
                     'avg_loss': f'{total_loss/num_batches:.4f}',
@@ -133,57 +124,94 @@ def train_model(model, train_loader, val_loader, device, args):
                 })
         
         # After each epoch, evaluate
-        avg_train_loss = total_loss / num_batches
-        val_loss = evaluate_model(model, val_loader, device)
-        training_stats['train_losses'].append(avg_train_loss)
-        training_stats['val_losses'].append(val_loss)
-        training_stats['learning_rates'].append(scheduler.get_last_lr()[0])
-        training_stats['epochs'].append(epoch + 1)
-        benchmark_result = None
-        if getattr(args, 'enable_benchmark', False) and ((epoch + 1) % benchmark_freq == 0 or epoch == 0):
-            print(f"\n🔄 Running benchmark evaluation at epoch {epoch+1}...")
+        avg_train_loss = total_loss / num_batches if num_batches > 0 else 0
+        val_loss = evaluate_model(model, val_loader, device, args)
+        
+        if is_main_process():
+            training_stats['train_losses'].append(avg_train_loss)
+            training_stats['val_losses'].append(val_loss)
+            training_stats['learning_rates'].append(scheduler.get_last_lr()[0])
+            training_stats['epochs'].append(epoch + 1)
+        
+        # Save checkpoint every epoch
+        if is_main_process():
+            from model import save_checkpoint
+            epoch_ckpt_path = args.save_path.replace('.pth', f'_epoch{epoch+1}.pth')
+            save_checkpoint(model, optimizer, epoch, epoch_ckpt_path)
+
+        if is_main_process() and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            from model import save_checkpoint
+            # Corrected the arguments for save_checkpoint
+            save_checkpoint(model, optimizer, epoch, args.save_path)
+
+        # Run benchmark evaluation if enabled
+        if is_main_process() and getattr(args, 'enable_benchmark', False) and (epoch + 1) % getattr(args, 'benchmark_freq', 10) == 0:
+            if logger:
+                logger.info(f"Running benchmark evaluation at epoch {epoch + 1}")
             try:
-                from transformers import AutoTokenizer
-                tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-                if tokenizer.pad_token is None:
-                    tokenizer.pad_token = tokenizer.eos_token
-                benchmark_result = run_benchmark_evaluation(model, tokenizer, device, args, epoch)
+                benchmark_result = run_benchmark_evaluation(model, epoch + 1, device, args, logger)
                 if benchmark_result:
                     training_stats['benchmark_results'].append(benchmark_result)
+                    if logger:
+                        logger.info(f"Benchmark completed: ASR = {benchmark_result.get('overall_asr', 'N/A')}")
             except Exception as e:
-                print(f"⚠️  Could not run benchmark evaluation: {e}")
-        if val_loss < best_val_loss:
-            from model import save_checkpoint
-            save_checkpoint(model, None, optimizer, scheduler, epoch, val_loss, args.save_path)
+                if logger:
+                    logger.warning(f"Benchmark evaluation failed: {e}")
+                print(f"Warning: Benchmark evaluation failed: {e}")
+
         epoch_time = time.time() - epoch_start_time
-        print(f"Epoch {epoch+1}/{args.epochs} completed in {epoch_time:.2f}s")
-        print(f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.2e}")
-        if benchmark_result:
-            print(f"Benchmark ASR: {benchmark_result.get('overall_asr', 0):.4f}")
-        print("-" * 50)
+        
+        if is_main_process():
+            # Import log_training_progress here to avoid circular import
+            from utils import log_training_progress
+            
+            print(f"Epoch {epoch+1}/{args.epochs} completed in {epoch_time:.2f}s")
+            print(f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Learning Rate: {scheduler.get_last_lr()[0]:.2e}")
+            print("-" * 50)
+            
+            # Log training progress
+            if logger:
+                log_training_progress(logger, epoch+1, args.epochs, avg_train_loss, val_loss, 
+                                    scheduler.get_last_lr()[0], epoch_time, best_val_loss)
+            
+        if should_break_epoch:
+            if dist.is_initialized():
+                dist.barrier(device_ids=[local_rank])
+            break
+
     results = {
         'best_val_loss': best_val_loss,
-        'final_train_loss': training_stats['train_losses'][-1],
-        'final_val_loss': training_stats['val_losses'][-1],
+        'final_train_loss': training_stats['train_losses'][-1] if training_stats['train_losses'] else 0,
+        'final_val_loss': training_stats['val_losses'][-1] if training_stats['val_losses'] else 0,
         'training_stats': training_stats,
         'total_epochs': args.epochs,
         'model_path': args.save_path
     }
-    print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
-    if training_stats['benchmark_results']:
-        print("\n📈 BENCHMARK PROGRESS SUMMARY")
-        print("="*50)
-        for result in training_stats['benchmark_results']:
-            print(f"Epoch {result['epoch']}: ASR = {result.get('overall_asr', 0):.4f}")
+    if is_main_process():
+        print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
+        if logger:
+            logger.info(f"Training completed! Best validation loss: {best_val_loss:.4f}")
+        if training_stats['benchmark_results']:
+            print("\n📈 BENCHMARK PROGRESS SUMMARY")
+            print("="*50)
+            if logger:
+                logger.info("BENCHMARK PROGRESS SUMMARY")
+            for result in training_stats['benchmark_results']:
+                msg = f"Epoch {result['epoch']}: ASR = {result.get('overall_asr', 'N/A'):.4f}"
+                print(msg)
+                if logger:
+                    logger.info(msg)
     return results
 
-def evaluate_model(model, val_loader, device):
+def evaluate_model(model, val_loader, device, args):
     model.eval()
     total_loss = 0
     num_batches = 0
     with torch.no_grad():
-        for batch in val_loader:
+        progress_bar = tqdm(val_loader, desc="Validation", disable=not is_main_process())
+        for batch in progress_bar:
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             role_mask = batch['role_mask'].to(device)
@@ -191,5 +219,16 @@ def evaluate_model(model, val_loader, device):
             loss = outputs['loss']
             total_loss += loss.item()
             num_batches += 1
+            
+    # Synchronize across all processes
+    if dist.is_initialized():
+        total_loss_tensor = torch.tensor(total_loss, device=device, dtype=torch.float32)
+        num_batches_tensor = torch.tensor(num_batches, device=device, dtype=torch.int64)
+        dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(num_batches_tensor, op=dist.ReduceOp.SUM)
+        avg_loss = total_loss_tensor.item() / num_batches_tensor.item() if num_batches_tensor.item() > 0 else 0.0
+    else:
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        
     model.train()
-    return total_loss / num_batches if num_batches > 0 else 0.0
+    return avg_loss

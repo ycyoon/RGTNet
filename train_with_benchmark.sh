@@ -4,12 +4,20 @@
 
 echo "🚀 Starting RGTNet DDP training with benchmark evaluation..."
 
-# 2개의 GPU를 사용하여 DDP로 main.py 실행
-# batch_size 1, gradient_accumulation_steps 8 -> 실질적인 배치 크기 1*2*8=16
+# GPU 메모리 체크
+echo "📊 Checking GPU memory..."
+nvidia-smi
+
+# 디렉토리 생성
+mkdir -p models results
+
+# 7개의 GPU를 사용하여 DDP로 main.py 실행 (GPU 0은 vLLM 서버용으로 제외)
+# batch_size 1, gradient_accumulation_steps 8 -> 실질적인 배치 크기 1*7*8=56
 # --use_amp : 메모리 절약을 위해 Automatic Mixed Precision 사용
-torchrun --nproc_per_node=8 main.py \
+echo "🔥 Starting training with 7 GPUs..."
+CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 --master_port=29600 main.py \
     --pretrained_model_name meta-llama/Meta-Llama-3-8B \
-    --epochs 1 \
+    --epochs 3 \
     --batch_size 1 \
     --gradient_accumulation_steps 8 \
     --use_amp \
@@ -18,15 +26,15 @@ torchrun --nproc_per_node=8 main.py \
     --results_file "results/llama3_8b_rgtnet_results.json" \
     --enable_benchmark \
     --benchmark_freq 1 \
-    --benchmark_dir "StructTransformBench/benchmark" \
     --dropout 0.1 \
     --bias_delta 1.0 \
-    --tokenizer_name "bert-base-uncased" \
     --weight_decay 0.01 \
     --warmup_ratio 0.1 \
     --download_datasets \
     --gradient_checkpointing \
-    --max_seq_len 4096
+    --max_seq_len 2048
+#    --max_iters 100 \
+#    --benchmark_dir "StructTransformBench/benchmark" \
 
 echo "✅ DDP Training completed!"
 
