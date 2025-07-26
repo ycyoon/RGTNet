@@ -71,7 +71,9 @@ class WildbenchMutator(MutationBase):
         tactics_examples = []
         for t in tactics:
             # To ensure enough excerpts exist for tactic t
-            num_excerpts = min(self.num_excerpts_per_tactic, self.tactics[t]["excerpt"])
+            # Fix: get the length of the excerpt list
+            excerpt_count = len(self.tactics[t]["excerpt"]) if isinstance(self.tactics[t]["excerpt"], list) else self.tactics[t]["excerpt"]
+            num_excerpts = min(self.num_excerpts_per_tactic, excerpt_count)
 
             tactics_definition.extend(random.sample(self.tactics[t]["definition"], 1))
             tactics_examples.append(random.sample(self.tactics[t]["excerpt"], num_excerpts))

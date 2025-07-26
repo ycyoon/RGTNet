@@ -15,6 +15,16 @@ Supported Models:
 - And more...
 """
 
+# OFFLINE_MODE_PATCH_APPLIED
+# Hugging Face 오프라인 모드 설정
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/ceph_data/ycyoon/.cache/huggingface"
+
+# Memory optimization settings
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import os
 import sys
 import pickle
@@ -28,6 +38,9 @@ import random
 import csv
 import cProfile
 import pstats
+# Force offline mode for Hugging Face to use cached files only
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Multi-GPU 지원 추가
 import torch
@@ -236,7 +249,7 @@ try:
                     tokenizer_kwargs.update({
                         'use_fast': True,  # Use fast tokenizer for better CPU performance
                         'trust_remote_code': True,  # Allow custom tokenizers
-                        'local_files_only': False  # Allow downloading if needed
+                        'local_files_only': True  # Use offline mode
                     })
                     
                     self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **tokenizer_kwargs)
@@ -253,6 +266,15 @@ try:
                             self.tokenizer.model_max_length = 2048  # Reduce for faster processing
                     
                     # Load model with optimizations
+                    self.model_kwargs['local_files_only'] = True
+                    # Add memory optimization settings
+                    self.model_kwargs.update({
+                        'torch_dtype': torch.float16,  # Use half precision
+                        'low_cpu_mem_usage': True,     # Reduce CPU memory usage
+                        'device_map': 'auto',          # Automatic device mapping
+                        'max_memory': {0: '20GiB'},    # Limit GPU memory usage
+                        'offload_folder': './model_offload',  # Offload to disk if needed
+                    })
                     self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **self.model_kwargs)
                     
                     # GPU and CPU pipeline optimizations
@@ -589,9 +611,10 @@ class HarmBenchEvaluator(ModelBase):
                 
                 # Try to use the specified model first, fallback if needed
                 try:
-                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
                     self.model = AutoModelForCausalLM.from_pretrained(
                         model_name, 
+                        local_files_only=True,
                         device_map=get_safe_device_map(),  # Use dynamic GPU allocation
                         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                         trust_remote_code=True
@@ -599,9 +622,10 @@ class HarmBenchEvaluator(ModelBase):
                     print(f"   ✅ Using original model: {model_name}")
                 except:
                     print(f"   ⚠️  Original model unavailable, using fallback: {eval_model_name}")
-                    self.tokenizer = AutoTokenizer.from_pretrained(eval_model_name)
+                    self.tokenizer = AutoTokenizer.from_pretrained(eval_model_name, local_files_only=True)
                     self.model = AutoModelForCausalLM.from_pretrained(
                         eval_model_name,
+                        local_files_only=True,
                         device_map=get_safe_device_map(),  # Use dynamic GPU allocation for fallback
                         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                         trust_remote_code=True
@@ -1646,6 +1670,11 @@ class MultiModelBenchmarkRunner:
                 try:
                     model_name = model_config["model_name"]
                     print(f"🔍 Checking local model availability: {model_name}")
+                    
+                    # Skip online API calls in offline mode
+                    if os.environ.get("HF_HUB_OFFLINE") == "1":
+                        print(f"📴 Offline mode - skipping online model availability check")
+                        return False
                     
                     # Try to check if model exists without fully loading it
                     try:

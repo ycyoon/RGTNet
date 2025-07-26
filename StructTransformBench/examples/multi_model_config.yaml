@@ -4,16 +4,16 @@ models_to_test:
 
 evaluators:
   eval_model:
-    model_name: "microsoft/DialoGPT-small"  # Faster small model for testing
-    port: 8001
+    model_name: "cais/HarmBench-Llama-2-13b-cls"
+    port: 8003
     use_local: true
   refusal_eval_model:
-    model_name: "unitary/toxic-bert"  # Faster classification model
-    port: 8002
+    model_name: "allenai/wildguard"  # Keep existing refusal evaluator
+    port: 8005
     use_local: true
   attack_model:
-    model_name: "dummy"
-    port: 9999
+    model_name: "microsoft/DialoGPT-medium"  # Use the same model for simplicity
+    port: 8001
 
 attack_settings:
   max_queries: 5  # Reduced for faster testing

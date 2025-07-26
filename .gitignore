@@ -26,6 +26,18 @@ MANIFEST
 *.pth
 *.pt
 
+# Model caches and downloads
+models/
+*.lock
+.cache/
+huggingface/
+
+# Server logs
+*.log
+server_*.log
+vllm_*.log
+hf_*.log
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
