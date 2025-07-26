@@ -31,12 +31,20 @@ models/
 *.lock
 .cache/
 huggingface/
+src/
+**/.cache/
+**/huggingface/
 
 # Server logs
 *.log
 server_*.log
 vllm_*.log
 hf_*.log
+quick_test_logs/
+quick_test_results/  
+safe_test_results/
+super_quick_results/
+demo_results/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -101,6 +109,11 @@ benchmark/
 results/
 logs/
 checkpoints/
+*.pth
+*.bin
+*.safetensors
+*.pkl
+*_results.json
 
 # IDE
 .vscode/
