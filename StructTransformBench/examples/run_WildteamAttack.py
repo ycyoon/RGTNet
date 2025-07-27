@@ -18,7 +18,7 @@ import torch
 TARGET_BASE_URL = "http://localhost:8001/v1"  # Target model (Llama 3.2 3B)
 ATTACK_BASE_URL = "http://localhost:8002/v1"  # Attack model (DeepSeek R1)
 EVAL_BASE_URL = "http://localhost:8003/v1"    # Eval model (HarmBench)
-FINAL_EVAL_BASE_URL = "http://localhost:8006/v1"  # Final eval (Llama 4 Scout)
+FINAL_EVAL_BASE_URL = "http://localhost:8006/v1"  # Final eval (Llama 3.2 70B Instruct)
 REF_EVAL_BASE_URL = "http://localhost:8004/v1"    # Refusal eval (WildGuard)
 
 API_KEY_ATTACK = "EMPTY"  # No API key needed for local vLLM servers

@@ -10,6 +10,21 @@ echo "⚠️  GPU 0,3 occupied by gmk_multiseg_strategies, using clean GPUs 1,2,
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Fix Python path to avoid loading development FlashInfer
+export PYTHONPATH=""
+
+# Disable FlashInfer to avoid compatibility issues
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export FLASHINFER_FORCE_BUILD_FROM_SOURCE=0
+export VLLM_ATTENTION_BACKEND="TORCH"  # Force PyTorch attention backend
+
+# Add distributed training stability settings
+export NCCL_TIMEOUT=1800  # 30 minutes timeout
+export NCCL_DEBUG=WARN
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_DISTRIBUTED_DEBUG=OFF
+export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+
 # Function to start a server in background
 start_server() {
     local model=$1
@@ -21,7 +36,23 @@ start_server() {
     local mem_util=${7:-0.95}  # Default gpu_memory_utilization
 
     echo "Starting $name on port $port using GPUs: $gpus (TP: $tp_size, MaxLen: $max_len, MemUtil: $mem_util)"
-    CUDA_VISIBLE_DEVICES=$gpus nohup /home/ycyoon/anaconda3/envs/rgtnet/bin/python -m vllm.entrypoints.openai.api_server \
+    
+    # Kill any existing process on this port
+    existing_pid=$(lsof -ti:$port 2>/dev/null)
+    if [ ! -z "$existing_pid" ]; then
+        echo "  Killing existing process on port $port (PID: $existing_pid)"
+        kill -9 $existing_pid 2>/dev/null
+        sleep 1
+    fi
+    
+    # Clear PYTHONPATH and set environment for each server
+    PYTHONPATH="" \
+    VLLM_USE_FLASHINFER_SAMPLER=0 \
+    VLLM_ATTENTION_BACKEND="TORCH" \
+    NCCL_TIMEOUT=1800 \
+    VLLM_WORKER_MULTIPROC_METHOD="spawn" \
+    CUDA_VISIBLE_DEVICES=$gpus \
+    nohup /home/ycyoon/anaconda3/envs/rgtnet/bin/python -m vllm.entrypoints.openai.api_server \
         --model "$model" \
         --port $port \
         --host 0.0.0.0 \
@@ -31,7 +62,8 @@ start_server() {
         --max-model-len $max_len \
         --block-size 16 \
         --enforce-eager \
-        --disable-custom-all-reduce > "server_${port}.log" 2>&1 &
+        --disable-custom-all-reduce \
+        --distributed-executor-backend "mp" > "server_${port}.log" 2>&1 &
     
     local pid=$!
     echo "Server $name (PID: $pid) starting on port $port..."
@@ -40,6 +72,7 @@ start_server() {
 # GPU Allocation Plan (avoiding occupied GPU 0,3)
 # GPU 1,2: DeepSeek-R1 (2 H100 GPUs)
 # GPU 4: HarmBench (1 GPU)  
+# GPU 5: WildGuard (1 GPU)
 # GPU 6,7: Meta-Llama-3-70B (2 GPUs)
 
 # Start DeepSeek-R1-Distill for PAIR attack model (Fix: Use 2 GPUs, reduce max_len)
@@ -47,6 +80,9 @@ start_server "deepseek-ai/DeepSeek-R1-Distill-Llama-70B" 8002 "DeepSeek-R1-Disti
 
 # Start HarmBench-Llama-2-13b for PAIR eval model (Fix: correct max_model_len)
 start_server "cais/HarmBench-Llama-2-13b-cls" 8003 "HarmBench-Llama-2-13b" "4" 1 2048
+
+# Start WildGuard for refusal evaluation
+start_server "allenai/wildguard" 8004 "WildGuard" "5" 1 2048
 
 # Start Meta-Llama-3-70B for final evaluation (Fix: Use Meta-Llama-3-70B-Instruct)
 start_server "meta-llama/Meta-Llama-3-70B-Instruct" 8006 "Meta-Llama-3-70B-Instruct" "6,7" 2
@@ -82,7 +118,7 @@ check_server_health() {
 
 # Check all servers
 all_running=true
-for port in 8002 8003 8006; do
+for port in 8002 8003 8004 8006; do
     if ! check_server_health $port; then
         all_running=false
         echo "❌ Server on port $port failed to start. Check server_${port}.log for details."
@@ -95,5 +131,5 @@ else
     echo "❌ Some servers failed to start."
 fi
 
-echo "🔍 Server logs available at: server_8002.log, server_8003.log, server_8006.log"
+echo "🔍 Server logs available at: server_8002.log, server_8003.log, server_8004.log, server_8006.log"
 echo "🌟 Multi-model servers ready for comprehensive attack testing!"
