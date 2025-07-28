@@ -30,10 +30,8 @@ def run_quick_training():
         "--epochs", "2",
         "--batch_size", "8",
         "--lr", "1e-4",
-        "--d_model", "256",
-        "--nhead", "4",
-        "--num_layers", "3",
-        "--max_length", "256",
+        "--pretrained_model_name", "bert-base-uncased",  # Use pretrained model, dimensions auto-detected
+        "--max_seq_len", "256",
         "--save_path", "rgt_instruction_model.pth",
         "--results_file", "instruction_training_results.json",
         "--device", "cuda" if torch.cuda.is_available() else "cpu"
@@ -100,13 +98,10 @@ def run_full_training():
         "--epochs", "3",
         "--batch_size", "16",
         "--lr", "5e-5",
-        "--d_model", "512",
-        "--nhead", "8",
-        "--num_layers", "6",
-        "--max_length", "512",
+        "--pretrained_model_name", "microsoft/DialoGPT-medium",  # Model dimensions auto-detected
+        "--max_seq_len", "512",
         "--save_path", "rgt_full_model.pth",
         "--results_file", "full_training_results.json",
-        "--pretrained_model", "microsoft/DialoGPT-medium",
         "--device", "cuda" if torch.cuda.is_available() else "cpu"
     ]
     

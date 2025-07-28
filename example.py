@@ -19,20 +19,31 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Model parameters
+    # Model parameters - now auto-detected from pretrained model
     vocab_size = 30522
-    d_model = 512
-    nhead = 8
-    num_layers = 6
+    pretrained_model_name = "bert-base-uncased"  # Example pretrained model
     num_labels = 2
     
-    # Initialize tokenizer
+    # Initialize tokenizer and get model config
     try:
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        print("Loaded BERT tokenizer")
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
+        print(f"Loaded tokenizer from {pretrained_model_name}")
+        
+        # Auto-detect model parameters from pretrained model
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(pretrained_model_name)
+        d_model = config.hidden_size
+        nhead = config.num_attention_heads
+        num_layers = config.num_hidden_layers
+        print(f"Auto-detected model config: d_model={d_model}, nhead={nhead}, num_layers={num_layers}")
+        
     except Exception as e:
-        print(f"Could not load tokenizer: {e}")
+        print(f"Could not load tokenizer/config: {e}")
         print("This is a demo - in real usage, ensure transformers is installed")
+        # Fallback to default values
+        d_model = 512
+        nhead = 8
+        num_layers = 6
         return
     
     # Initialize model

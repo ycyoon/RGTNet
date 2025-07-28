@@ -3,9 +3,8 @@
 # Model Configuration
 model:
   vocab_size: 30522
-  d_model: 512
-  nhead: 8
-  num_layers: 6
+  # d_model, nhead, num_layers are now auto-detected from pretrained_model_name
+  pretrained_model_name: "meta-llama/Llama-3.2-3B-Instruct"  # Model parameters will be auto-detected
   num_labels: 2
   bias_delta: 1.0
 

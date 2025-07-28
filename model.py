@@ -463,18 +463,46 @@ class RoleAwareTransformerDecoder(nn.Module):
 
 def create_model(args, pad_idx):
     """Creates the RoleAwareTransformerDecoder model."""
+    # Auto-detect model parameters from pretrained model if specified
+    if args.pretrained_model_name:
+        from transformers import AutoConfig
+        try:
+            pretrained_config = AutoConfig.from_pretrained(args.pretrained_model_name)
+            d_model = pretrained_config.hidden_size
+            nhead = pretrained_config.num_attention_heads
+            num_layers = pretrained_config.num_hidden_layers
+            print(f"Auto-detected model config from {args.pretrained_model_name}:")
+            print(f"  d_model: {d_model}")
+            print(f"  nhead: {nhead}")
+            print(f"  num_layers: {num_layers}")
+        except Exception as e:
+            print(f"Warning: Could not auto-detect config from {args.pretrained_model_name}: {e}")
+            print("Using default model parameters")
+            d_model = 512
+            nhead = 8
+            num_layers = 6
+    else:
+        # Use default parameters when no pretrained model is specified
+        d_model = 512
+        nhead = 8
+        num_layers = 6
+        print("Using default model config (no pretrained model specified):")
+        print(f"  d_model: {d_model}")
+        print(f"  nhead: {nhead}")
+        print(f"  num_layers: {num_layers}")
+    
     model = RoleAwareTransformerDecoder(
         vocab_size=args.vocab_size,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.d_model * 4,
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        dim_feedforward=d_model * 4,
         dropout=args.dropout,
         bias_delta=args.bias_delta,
         pad_idx=pad_idx,
         max_seq_len=args.max_seq_len,
         pretrained_model_name=args.pretrained_model_name,
-        use_gradient_checkpointing=args.gradient_checkpointing
+        use_gradient_checkpointing=getattr(args, 'gradient_checkpointing', False)
     )
     return model
 

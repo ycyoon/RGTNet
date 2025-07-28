@@ -59,8 +59,9 @@ def main():
         
         # Limit initial reserved memory to reduce fragmentation
         try:
-            torch.cuda.set_per_process_memory_fraction(0.85, device)  # More conservative
-        except AttributeError:
+            # Use device index (local_rank) instead of device object
+            torch.cuda.set_per_process_memory_fraction(0.85, local_rank)  # More conservative
+        except (AttributeError, ValueError):
             pass
         
         # Initialize with extended timeout
@@ -108,8 +109,10 @@ def main():
         # Limit initial reserved memory in single-GPU case as well
         if torch.cuda.is_available():
             try:
-                torch.cuda.set_per_process_memory_fraction(0.9, device)
-            except AttributeError:
+                # Extract device index from device object
+                device_index = device.index if device.index is not None else 0
+                torch.cuda.set_per_process_memory_fraction(0.9, device_index)
+            except (AttributeError, ValueError):
                 pass
         rank = 0
         local_rank = 0
@@ -170,9 +173,10 @@ def main():
         )
         
         # Auto wrap policy for transformer layers
+        # Use RoleAwareTransformerLayer instead of CheckpointedRoleAwareTransformerLayer to avoid gradient checkpointing issues
         auto_wrap_policy = partial(
             transformer_auto_wrap_policy, 
-            transformer_layer_cls={CheckpointedRoleAwareTransformerLayer}
+            transformer_layer_cls={RoleAwareTransformerLayer}
         )
         
         # FSDP with conservative settings for NCCL stability
@@ -187,8 +191,8 @@ def main():
             param_init_fn=None,
             use_orig_params=True,   # Use original parameters for better NCCL compatibility
             limit_all_gathers=True,  # Reduce memory usage
-            forward_prefetch=False,  # Disable prefetching to reduce NCCL calls
-            backward_prefetch=False  # Disable backward prefetching
+            forward_prefetch=True,   # Enable prefetching for better performance
+            backward_prefetch=True   # Enable backward prefetching
         )
         
         if rank == 0:
@@ -225,14 +229,14 @@ def main():
             num_replicas=world_size,
             rank=rank,
             shuffle=True,
-            drop_last=True  # Important for FSDP stability
+            drop_last=False  # Changed to False to prevent batch size inconsistency
         )
         val_sampler = DistributedSampler(
             val_dataset, 
             num_replicas=world_size,
             rank=rank,
             shuffle=False, 
-            drop_last=True
+            drop_last=False  # Changed to False to prevent batch size inconsistency
         )
         
         # Conservative num_workers for H100 stability

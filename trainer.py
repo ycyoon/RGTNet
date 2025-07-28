@@ -11,6 +11,12 @@ import torch.distributed as dist
 from model import load_checkpoint
 
 
+def cleanup_memory():
+    """Clean up GPU memory between epochs"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
 
@@ -42,7 +48,18 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
     }
     
     start_epoch = 0
-    if getattr(args, 'resume', False) and os.path.exists(args.save_path):
+    if getattr(args, 'resume_from_checkpoint', None) and os.path.exists(args.resume_from_checkpoint):
+        try:
+            # Pass is_main_process() to prevent duplicate logging
+            start_epoch = load_checkpoint(model, optimizer, args.resume_from_checkpoint, device, is_main_process())
+            if is_main_process():
+                print(f"Resuming training from checkpoint: {args.resume_from_checkpoint}")
+                print(f"Starting from epoch {start_epoch}...")
+        except Exception as e:
+            if is_main_process():
+                print(f"⚠️  Failed to load checkpoint: {e}. Starting from scratch.")
+            start_epoch = 0
+    elif getattr(args, 'resume', False) and os.path.exists(args.save_path):
         try:
             # Pass is_main_process() to prevent duplicate logging
             start_epoch = load_checkpoint(model, optimizer, args.save_path, device, is_main_process())
@@ -63,9 +80,14 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
         if logger:
             logger.info(f"Starting training for {args.epochs} epochs...")
             logger.info(f"Learning rate: {args.lr}, Batch size: {args.batch_size}")
-            logger.info(f"Model parameters: d_model={args.d_model}, nhead={args.nhead}, num_layers={args.num_layers}")
+            # Model parameters are now auto-detected from pretrained model
+            logger.info(f"Pretrained model: {getattr(args, 'pretrained_model_name', 'None')}")
+            logger.info(f"Model parameters will be auto-detected from pretrained model config")
     
     for epoch in range(start_epoch, args.epochs):
+        # Clean up memory at the start of each epoch
+        cleanup_memory()
+        
         if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
         
@@ -150,11 +172,14 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
             if logger:
                 logger.info(f"Running benchmark evaluation at epoch {epoch + 1}")
             try:
-                benchmark_result = run_benchmark_evaluation(model, epoch + 1, device, args, logger)
-                if benchmark_result:
-                    training_stats['benchmark_results'].append(benchmark_result)
-                    if logger:
-                        logger.info(f"Benchmark completed: ASR = {benchmark_result.get('overall_asr', 'N/A')}")
+                # Placeholder for benchmark evaluation - function not yet implemented
+                # benchmark_result = run_benchmark_evaluation(model, epoch + 1, device, args, logger)
+                # if benchmark_result:
+                #     training_stats['benchmark_results'].append(benchmark_result)
+                #     if logger:
+                #         logger.info(f"Benchmark completed: ASR = {benchmark_result.get('overall_asr', 'N/A')}")
+                if logger:
+                    logger.info(f"Benchmark evaluation placeholder - epoch {epoch + 1}")
             except Exception as e:
                 if logger:
                     logger.warning(f"Benchmark evaluation failed: {e}")

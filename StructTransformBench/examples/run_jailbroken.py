@@ -93,7 +93,7 @@ target_model = OpenaiModel(
     }
 )
 
-attack_model = OpenaiModel(model_name="deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+attack_model = OpenaiModel(model_name="meta-llama/Llama-3.1-70B-Instruct",
                            base_url=ATTACK_BASE_URL,
                            api_keys=API_KEY_ATTACK,
                            generation_config={

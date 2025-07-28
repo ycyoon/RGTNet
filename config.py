@@ -6,10 +6,7 @@ def setup_args():
     """Setup command line arguments"""
     parser = argparse.ArgumentParser(description='RGTNet Training')
     
-    # Model parameters
-    parser.add_argument('--d_model', type=int, default=512, help='Model dimension')
-    parser.add_argument('--nhead', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--num_layers', type=int, default=6, help='Number of transformer layers')
+    # Model parameters - removed d_model, nhead, num_layers as they will be auto-detected from pretrained model
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--max_seq_len', type=int, default=512, help='Maximum sequence length')
     parser.add_argument('--bias_delta', type=float, default=1.0, help='Role-gated attention bias delta')
@@ -38,6 +35,7 @@ def setup_args():
     # Output parameters
     parser.add_argument('--save_path', type=str, default='model.pth', help='Model save path')
     parser.add_argument('--results_file', type=str, default='results.json', help='Results file path')
+    parser.add_argument('--resume_from_checkpoint', type=str, default=None, help='Path to checkpoint to resume from')
     
     # Execution parameters
     parser.add_argument('--train_only', action='store_true', help='Only run training')
