@@ -13,10 +13,148 @@ os.environ["HF_HOME"] = "/ceph_data/ycyoon/.cache/huggingface"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 sys.path.append(os.getcwd())
+sys.path.append('/home/ycyoon/work/RGTNet')  # Add RGTNet path
 from easyjailbreak.attacker.PAIR_chao_2023 import PAIR
 from easyjailbreak.datasets import JailbreakDataset
 from easyjailbreak.models.openai_model import OpenaiModel
+from easyjailbreak.models.model_base import ModelBase
 import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# Import RGTNet modules
+try:
+    from model import create_model, load_checkpoint
+    from config import setup_args
+    RGTNET_AVAILABLE = True
+    print("✅ RGTNet modules imported successfully")
+except ImportError as e:
+    print(f"⚠️ RGTNet modules not available: {e}")
+    RGTNET_AVAILABLE = False
+
+class RGTNetModel(ModelBase):
+    """Wrapper for locally trained RGTNet models"""
+    
+    def __init__(self, model_path: str, pretrained_model_name: str = None):
+        super().__init__()
+        self.model_path = model_path
+        self.pretrained_model_name = pretrained_model_name or "meta-llama/Llama-3.2-3B-Instruct"
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        print(f"🔧 Loading RGTNet model from: {model_path}")
+        
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Create model configuration
+        self._setup_model_config()
+        
+        # Load the trained model
+        self.model = self._load_trained_model()
+        self.model.eval()
+        
+        print(f"✅ RGTNet model loaded successfully on {self.device}")
+    
+    def _setup_model_config(self):
+        """Setup model configuration based on pretrained model"""
+        from transformers import AutoConfig
+        
+        # Get pretrained model config
+        pretrained_config = AutoConfig.from_pretrained(self.pretrained_model_name)
+        
+        # Create args object for model creation
+        class ModelArgs:
+            def __init__(self):
+                self.d_model = pretrained_config.hidden_size
+                self.nhead = pretrained_config.num_attention_heads
+                self.num_layers = pretrained_config.num_hidden_layers
+                self.dropout = 0.1
+                self.max_seq_len = getattr(pretrained_config, 'max_position_embeddings', 2048)
+                self.bias_delta = 1.0
+                self.vocab_size = pretrained_config.vocab_size
+                self.pretrained_model_name = self.pretrained_model_name
+        
+        self.args = ModelArgs()
+        print(f"📊 Model config: d_model={self.args.d_model}, layers={self.args.num_layers}, heads={self.args.nhead}")
+    
+    def _load_trained_model(self):
+        """Load the trained RGTNet model"""
+        # Create model
+        model = create_model(self.args, self.tokenizer.pad_token_id)
+        
+        # Load checkpoint
+        checkpoint = torch.load(self.model_path, map_location='cpu')
+        
+        if 'model_state_dict' in checkpoint:
+            # Handle FSDP checkpoint
+            model_state = checkpoint['model_state_dict']
+            
+            # Try to load state dict
+            try:
+                model.load_state_dict(model_state, strict=False)
+                print("✅ Checkpoint loaded successfully")
+            except Exception as e:
+                print(f"⚠️ Failed to load checkpoint completely: {e}")
+                print("🔄 Loading with strict=False for partial compatibility")
+                # Load what we can
+                model_dict = model.state_dict()
+                pretrained_dict = {k: v for k, v in model_state.items() 
+                                 if k in model_dict and v.shape == model_dict[k].shape}
+                model_dict.update(pretrained_dict)
+                model.load_state_dict(model_dict)
+                print(f"✅ Loaded {len(pretrained_dict)}/{len(model_dict)} parameters")
+        else:
+            # Direct model state
+            model.load_state_dict(checkpoint)
+        
+        return model.to(self.device)
+    
+    def generate(self, prompts, **kwargs):
+        """Generate responses for given prompts"""
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        
+        responses = []
+        
+        with torch.no_grad():
+            for prompt in prompts:
+                # Tokenize input
+                inputs = self.tokenizer(
+                    prompt, 
+                    return_tensors="pt", 
+                    truncation=True, 
+                    max_length=self.args.max_seq_len - 512,  # Leave room for generation
+                    padding=True
+                ).to(self.device)
+                
+                # Generate
+                try:
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model.generate(
+                            inputs.input_ids,
+                            attention_mask=inputs.attention_mask,
+                            max_new_tokens=kwargs.get('max_tokens', 512),
+                            temperature=kwargs.get('temperature', 0.7),
+                            do_sample=kwargs.get('temperature', 0.7) > 0,
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                            use_cache=True
+                        )
+                    
+                    # Decode response
+                    response = self.tokenizer.decode(
+                        outputs[0][inputs.input_ids.shape[1]:], 
+                        skip_special_tokens=True
+                    ).strip()
+                    
+                    responses.append(response)
+                    
+                except Exception as e:
+                    print(f"⚠️ Generation failed for prompt: {e}")
+                    responses.append("Error: Generation failed")
+        
+        return responses if len(responses) > 1 else responses[0]
 
 # First, prepare models and datasets.
 TARGET_BASE_URL = "http://localhost:8001/v1"  # Target model (Llama 3.2 3B)
@@ -88,6 +226,12 @@ parser = argparse.ArgumentParser(description='Run PAIR attack on different model
 parser.add_argument('--target-model', type=str, default='llama-3.2-1b',
                     choices=list(FOUNDATION_MODELS.keys()),
                     help='Target model to attack')
+parser.add_argument('--trained-model-path', type=str, default=None,
+                    help='Path to trained RGTNet model checkpoint (e.g., /path/to/model.pth)')
+parser.add_argument('--pretrained-model-name', type=str, default="meta-llama/Llama-3.2-3B-Instruct",
+                    help='Base pretrained model name for trained model')
+parser.add_argument('--use-trained-model', action='store_true',
+                    help='Use trained RGTNet model instead of foundation model')
 parser.add_argument('--dataset-size', type=int, default=None,
                     help='Number of samples to use from dataset')
 args = parser.parse_args()
@@ -199,21 +343,50 @@ def get_free_gpu():
     # Default to GPU 1 if check fails
     return "1"
 
-# Start target model server
-free_gpu = get_free_gpu()
-target_server_process = start_target_server(model_config["model_name"], gpu=free_gpu)
-target_model = OpenaiModel(
-    model_name=model_config["model_name"],
-    api_keys=model_config["api_key"],
-    base_url=model_config["base_url"],
-    generation_config={
-        "temperature": 0,
-        "top_p": 1.0,
-        "max_tokens": 1024
-    }
-)
-
-print(f"✅ Target model {model_config['model_name']} configured for vLLM server!")
+# Create target model based on arguments
+if args.use_trained_model or args.trained_model_path:
+    # Use trained RGTNet model
+    if not RGTNET_AVAILABLE:
+        print("❌ RGTNet modules not available, cannot load trained model")
+        sys.exit(1)
+    
+    if not args.trained_model_path:
+        # Default to epoch1 checkpoint if no path specified
+        args.trained_model_path = "/home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth"
+    
+    if not os.path.exists(args.trained_model_path):
+        print(f"❌ Trained model not found at: {args.trained_model_path}")
+        print("Available model files:")
+        model_dir = os.path.dirname(args.trained_model_path)
+        if os.path.exists(model_dir):
+            for f in os.listdir(model_dir):
+                if f.endswith('.pth'):
+                    print(f"  - {os.path.join(model_dir, f)}")
+        sys.exit(1)
+    
+    print(f"🎯 Using trained RGTNet model: {args.trained_model_path}")
+    target_model = RGTNetModel(args.trained_model_path, args.pretrained_model_name)
+    target_server_process = None  # No server process for local model
+    
+else:
+    # Use foundation model via vLLM server
+    model_config = FOUNDATION_MODELS[args.target_model]
+    
+    # Start target model server
+    free_gpu = get_free_gpu()
+    target_server_process = start_target_server(model_config["model_name"], gpu=free_gpu)
+    target_model = OpenaiModel(
+        model_name=model_config["model_name"],
+        api_keys=model_config["api_key"],
+        base_url=model_config["base_url"],
+        generation_config={
+            "temperature": 0,
+            "top_p": 1.0,
+            "max_tokens": 1024
+        }
+    )
+    
+    print(f"✅ Target model {model_config['model_name']} configured for vLLM server!")
 
 # Attack model - still uses vLLM server
 attack_model = OpenaiModel(
@@ -257,7 +430,13 @@ dataset._dataset = dataset._dataset
 if args.dataset_size:
     dataset._dataset = dataset._dataset[:args.dataset_size]
 
-SAVE_PATH = f"logs/PAIR-{args.target_model}-results"
+# Set save path based on model type
+if args.use_trained_model or args.trained_model_path:
+    model_name_for_save = f"trained-{os.path.basename(args.trained_model_path).replace('.pth', '')}"
+else:
+    model_name_for_save = args.target_model
+
+SAVE_PATH = f"logs/PAIR-{model_name_for_save}-results"
 
 # Ensure to create the save path
 os.makedirs(SAVE_PATH, exist_ok=True)
@@ -277,16 +456,25 @@ attacker = PAIR(attack_model=attack_model,
 
 # 공격 실행 (Llama-3.1-70B-Instruct 사용)
 try:
-    print(f"Starting PAIR attack on {args.target_model} with Llama-3.1-70B-Instruct...")
-    attacker.attack(save_path=f'{args.target_model}_llama31_70b_result.jsonl')
-    print(f"✅ PAIR attack on {args.target_model} completed successfully!")
+    if args.use_trained_model or args.trained_model_path:
+        print(f"🎯 Starting PAIR attack on trained RGTNet model: {args.trained_model_path}")
+    else:
+        print(f"🎯 Starting PAIR attack on {args.target_model} with Llama-3.1-70B-Instruct...")
+    
+    attacker.attack(save_path=f'{model_name_for_save}_llama31_70b_result.jsonl')
+    
+    if args.use_trained_model or args.trained_model_path:
+        print(f"✅ PAIR attack on trained RGTNet model completed successfully!")
+    else:
+        print(f"✅ PAIR attack on {args.target_model} completed successfully!")
+        
 except Exception as e:
-    print(f"PAIR attack on {args.target_model} failed: {e}")
+    print(f"❌ PAIR attack failed: {e}")
     import traceback
     traceback.print_exc()
 finally:
     # Clean up target server and GPU memory
-    if 'target_server_process' in locals() and target_server_process:
+    if target_server_process:
         print("🛑 Stopping target model server...")
         target_server_process.terminate()
         try:
@@ -297,6 +485,6 @@ finally:
         # Also kill any remaining processes on port 8001
         kill_cmd = "lsof -ti:8001 | xargs kill -9"
         subprocess.run(kill_cmd, shell=True, stderr=subprocess.DEVNULL)
-        
+    
     torch.cuda.empty_cache()
     print("🧹 GPU memory cleaned up")

@@ -28,7 +28,7 @@ def setup_args():
     parser.add_argument('--download_datasets', action='store_true', help='Download datasets')
     parser.add_argument('--train_file', type=str, help='Training data file')
     parser.add_argument('--val_file', type=str, help='Validation data file')
-    parser.add_argument('--tokenizer_name', type=str, default='bert-base-uncased', help='Tokenizer name')
+    # 토크나이저는 사전 훈련된 모델의 이름을 사용하여 자동으로 로드
     parser.add_argument('--pretrained_model_name', type=str, default=None, help='Pretrained model name for initialization')
     parser.add_argument('--benchmark_dir', type=str, default=None, help='Directory containing benchmark datasets')
     

@@ -133,10 +133,17 @@ def main():
     if rank == 0:
         check_gpu_memory()
     
+
+    
     # Initialize tokenizer and set pad_token
+    # if rank == 0:
+    #     print(f"Loading tokenizer: {args.tokenizer_name}")
+    # tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    # pretrined_model과 동일한 tokenizer를 사용하도록 변경
     if rank == 0:
-        print(f"Loading tokenizer: {args.tokenizer_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+        print(f"Loading tokenizer from pretrained model: {args.pretrained_model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name)
+
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is not None:
             if rank == 0:
@@ -268,7 +275,14 @@ def main():
         
         # Save training results and log final performance
         if rank == 0:
-            training_results_file = args.results_file.replace('.json', '_training.json')
+            # Create timestamped results directory
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_dir = os.path.join(os.path.dirname(args.results_file), f"results_{timestamp}")
+            os.makedirs(results_dir, exist_ok=True)
+            
+            # Save training results in timestamped directory
+            training_results_file = os.path.join(results_dir, "training_results.json")
             save_results(training_results, training_results_file)
             
             # Log final performance summary
@@ -294,7 +308,8 @@ def main():
         # Print and save evaluation results
         if rank == 0:
             print_evaluation_summary(eval_results)
-            eval_results_file = args.results_file.replace('.json', '_evaluation.json')
+            # Use the same timestamped results directory
+            eval_results_file = os.path.join(results_dir, "evaluation_results.json")
             save_evaluation_results(eval_results, eval_results_file)
             
             # Log evaluation results

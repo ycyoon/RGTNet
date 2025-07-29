@@ -4,9 +4,18 @@ import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
-import math
+import time
 import os
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    StateDictType,
+    FullStateDictConfig,
+)
+from torch.distributed.fsdp.wrap import (
+    transformer_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
 
 # -------------------- Core Model Definitions --------------------
 
@@ -477,16 +486,16 @@ def create_model(args, pad_idx):
             print(f"  num_layers: {num_layers}")
         except Exception as e:
             print(f"Warning: Could not auto-detect config from {args.pretrained_model_name}: {e}")
-            print("Using default model parameters")
-            d_model = 512
-            nhead = 8
-            num_layers = 6
+            print("Using args parameters")
+            d_model = args.d_model
+            nhead = args.nhead
+            num_layers = args.num_layers
     else:
-        # Use default parameters when no pretrained model is specified
-        d_model = 512
-        nhead = 8
-        num_layers = 6
-        print("Using default model config (no pretrained model specified):")
+        # Use parameters from args when no pretrained model is specified
+        d_model = args.d_model
+        nhead = args.nhead
+        num_layers = args.num_layers
+        print("Using args model config:")
         print(f"  d_model: {d_model}")
         print(f"  nhead: {nhead}")
         print(f"  num_layers: {num_layers}")
@@ -506,39 +515,469 @@ def create_model(args, pad_idx):
     )
     return model
 
-def save_checkpoint(model, optimizer, epoch, save_path):
-    """Save model checkpoint."""
-    if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel, FSDP)):
-        model_state_dict = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
-    else:
-        model_state_dict = model.state_dict()
+# trainer.py의 save_checkpoint 함수 수정
+def use_fsdp_consolidation(base_path, rank_count, output_path):
+    """FSDP의 내장 병합 기능을 사용하여 shard 파일들을 병합"""
+    print(f"\n--- Using FSDP consolidation to merge {rank_count} sharded checkpoints ---")
     
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model_state_dict,
-        'optimizer_state_dict': optimizer.state_dict(),
-    }, save_path)
-    print(f"Checkpoint saved to {save_path}")
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+    import torch.distributed as dist
+    import os
+    
+    # 분산 환경 초기화 (단일 프로세스)
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    os.environ['RANK'] = '0'
+    os.environ['LOCAL_RANK'] = '0'
+    os.environ['WORLD_SIZE'] = '1'
+    
+    print("  Initializing single-process distributed environment...")
+    dist.init_process_group(backend='gloo', rank=0, world_size=1)
+    
+    try:
+        # 모든 shard 파일 확인
+        shard_files = []
+        for rank in range(rank_count):
+            shard_path = f"{base_path}.rank{rank}.pt"
+            if os.path.exists(shard_path):
+                shard_files.append(shard_path)
+                print(f"  Found shard: {shard_path}")
+            else:
+                print(f"  ⚠️  Missing shard: {shard_path}")
+        
+        if not shard_files:
+            print("❌ No shard files found!")
+            return False
+        
+        # 첫 번째 shard에서 기본 정보 가져오기
+        print(f"  Loading first shard to check structure...")
+        
+        # 단일 프로세스 환경에서 로드 시도
+        first_shard = torch.load(shard_files[0], map_location='cpu', weights_only=False)
+        print(f"  Successfully loaded first shard")
+        print(f"  First shard keys: {list(first_shard.keys())}")
+        
+        # 병합된 state_dict 생성
+        merged_state_dict = OrderedDict()
+        epoch = -1
+        
+        # 각 shard에서 파라미터 수집
+        for rank, shard_path in enumerate(shard_files):
+            print(f"  Loading shard {rank}: {shard_path}")
+            
+            try:
+                # 단일 프로세스 환경에서 로드
+                checkpoint = torch.load(shard_path, map_location='cpu', weights_only=False)
+                
+                if 'model' in checkpoint:
+                    # FSDP sharded state dict
+                    sharded_state = checkpoint['model']
+                    print(f"    Shard {rank} has {len(sharded_state)} parameters")
+                    
+                    for key, value in sharded_state.items():
+                        if key not in merged_state_dict:
+                            merged_state_dict[key] = value
+                        else:
+                            # 이미 있는 경우 덮어쓰기 (마지막 shard가 우선)
+                            merged_state_dict[key] = value
+                    
+                    if epoch == -1:
+                        epoch = checkpoint.get('epoch', 0)
+                else:
+                    print(f"    ⚠️  No 'model' key in shard {rank}")
+                    
+            except Exception as e:
+                print(f"    ❌ Error loading shard {rank}: {e}")
+                continue
+        
+        print(f"  Total merged parameters: {len(merged_state_dict)}")
+        
+        # 병합된 체크포인트 저장
+        merged_checkpoint = {
+            'model_state_dict': merged_state_dict,
+            'epoch': epoch
+        }
+        
+        torch.save(merged_checkpoint, output_path)
+        print(f"✅ Merged checkpoint saved to: {output_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error merging shards: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        # 분산 환경 정리
+        if dist.is_initialized():
+            dist.destroy_process_group()
+            print("  Cleaned up distributed environment")
 
-def load_checkpoint(model, optimizer, save_path, device, is_main_process):
-    """Load model checkpoint."""
-    if not os.path.exists(save_path):
-        if is_main_process:
-            print(f"No checkpoint found at {save_path}. Starting from scratch.")
-        return 0
+def merge_sharded_checkpoints(base_path, rank_count, output_path):
+    """Merge sharded checkpoints into a single file"""
+    from collections import OrderedDict
+    import torch.distributed as dist
+    
+    print(f"\n--- Merging {rank_count} sharded checkpoints ---")
+    
+    # Load all shards
+    full_state_dict = OrderedDict()
+    epoch = -1
+    
+    for rank in range(rank_count):
+        shard_path = f"{base_path}.rank{rank}.pt"
+        if os.path.exists(shard_path):
+            print(f"  Loading shard: {shard_path}")
+            try:
+                # Set environment variables to match the rank that saved this shard
+                original_rank = os.environ.get('RANK', '0')
+                original_local_rank = os.environ.get('LOCAL_RANK', '0')
+                
+                # Temporarily set rank to match the shard being loaded
+                os.environ['RANK'] = str(rank)
+                os.environ['LOCAL_RANK'] = str(rank)
+                
+                # Load the checkpoint
+                checkpoint = torch.load(shard_path, map_location='cpu', weights_only=False)
+                
+                # Restore original rank
+                os.environ['RANK'] = original_rank
+                os.environ['LOCAL_RANK'] = original_local_rank
+                
+                if 'model' in checkpoint:
+                    full_state_dict.update(checkpoint['model'])
+                    if epoch == -1:
+                        epoch = checkpoint.get('epoch', 0)
+                        
+            except Exception as e:
+                print(f"  ❌ Error loading shard {rank}: {e}")
+                # Try alternative loading method
+                try:
+                    print(f"  🔄 Trying alternative loading method for shard {rank}...")
+                    checkpoint = torch.load(shard_path, map_location='cpu', weights_only=True)
+                    if 'model' in checkpoint:
+                        full_state_dict.update(checkpoint['model'])
+                        if epoch == -1:
+                            epoch = checkpoint.get('epoch', 0)
+                except Exception as e2:
+                    print(f"  ❌ Alternative loading also failed for shard {rank}: {e2}")
+                    continue
+        else:
+            print(f"  ⚠️  Warning: Shard not found: {shard_path}")
+    
+    if full_state_dict:
+        # Save merged checkpoint
+        merged_checkpoint = {
+            'model_state_dict': full_state_dict,
+            'epoch': epoch
+        }
         
-    checkpoint = torch.load(save_path, map_location=device)
-    
-    # Handle DDP-saved models by removing 'module.' prefix
-    state_dict = checkpoint['model_state_dict']
-    new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(new_state_dict)
-    
-    if optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Try to preserve optimizer state from rank 0
+        rank0_shard_path = f"{base_path}.rank0.pt"
+        if os.path.exists(rank0_shard_path):
+            try:
+                # Set environment variables for rank 0
+                original_rank = os.environ.get('RANK', '0')
+                original_local_rank = os.environ.get('LOCAL_RANK', '0')
+                os.environ['RANK'] = '0'
+                os.environ['LOCAL_RANK'] = '0'
+                
+                rank0_checkpoint = torch.load(rank0_shard_path, map_location='cpu', weights_only=False)
+                
+                # Restore original rank
+                os.environ['RANK'] = original_rank
+                os.environ['LOCAL_RANK'] = original_local_rank
+                
+                if 'optimizer' in rank0_checkpoint:
+                    merged_checkpoint['optimizer_state_dict'] = rank0_checkpoint['optimizer']
+                    print("  ✅ Preserved optimizer state from rank 0")
+            except Exception as e:
+                print(f"  ⚠️  Could not preserve optimizer state: {e}")
         
-    epoch = checkpoint['epoch']
-    if is_main_process:
-        print(f"Checkpoint loaded from {save_path}, resuming from epoch {epoch+1}")
-    return epoch + 1
+        torch.save(merged_checkpoint, output_path)
+        print(f"✅ Merged checkpoint saved to: {output_path}")
+        
+        # Clean up shard files
+        for rank in range(rank_count):
+            shard_path = f"{base_path}.rank{rank}.pt"
+            if os.path.exists(shard_path):
+                os.remove(shard_path)
+                print(f"  Removed shard: {shard_path}")
+        
+        return True
+    else:
+        print("❌ No shards found to merge!")
+        return False
+
+def verify_checkpoint(checkpoint_path):
+    """Verify if checkpoint is valid"""
+    if not os.path.exists(checkpoint_path):
+        print(f"❌ Checkpoint not found: {checkpoint_path}")
+        return False
+    
+    try:
+        # weights_only=False 추가
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        if 'model_state_dict' in checkpoint or 'model' in checkpoint:
+            print(f"✅ Valid checkpoint verified: {checkpoint_path}")
+            return True
+        else:
+            print(f"❌ Invalid checkpoint format: {checkpoint_path}")
+            return False
+    except Exception as e:
+        print(f"❌ Error loading checkpoint: {e}")
+        return False
+
+def load_checkpoint(model, optimizer, checkpoint_path, device, is_main=True):
+    """Load checkpoint from file"""
+    import torch.distributed as dist
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # weights_only=False 추가
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Handle different checkpoint formats
+    if 'model_state_dict' in checkpoint:
+        model_state = checkpoint['model_state_dict']
+    elif 'model' in checkpoint:
+        model_state = checkpoint['model']
+    else:
+        # Assume the checkpoint is the state dict itself
+        model_state = checkpoint
+    
+    # Load model state
+    if isinstance(model, FSDP):
+        # For FSDP models, we need to use the appropriate loading strategy
+        # Check if this is a merged checkpoint (non-sharded state dict)
+        if 'model_state_dict' in checkpoint:
+            # This is a merged checkpoint, use FULL_STATE_DICT
+            from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+            cfg = FullStateDictConfig(offload_to_cpu=False)
+            with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+                model.load_state_dict(model_state)
+        else:
+            # This is a sharded checkpoint, use SHARDED_STATE_DICT
+            from torch.distributed.fsdp import StateDictType, ShardedStateDictConfig
+            cfg = ShardedStateDictConfig(offload_to_cpu=False)
+            with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT, cfg):
+                model.load_state_dict(model_state)
+    else:
+        model.load_state_dict(model_state)
+    
+    # Load optimizer state if available
+    if optimizer and 'optimizer_state_dict' in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if is_main:
+                print("✅ Optimizer state loaded successfully")
+        except Exception as e:
+            if is_main:
+                print(f"⚠️  Warning: Could not load optimizer state: {e}")
+                print("   Initializing fresh optimizer state")
+    
+    # Get epoch
+    epoch = checkpoint.get('epoch', 0)
+    
+    if is_main:
+        print(f"✅ Checkpoint loaded from epoch {epoch}")
+    
+    return epoch
+
+import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType
+
+
+def save_checkpoint(model, optimizer, epoch, args, save_path=None, force_merge=False):
+    """
+    Save checkpoint with automatic merging after each epoch
+    
+    Args:
+        model: Model to save
+        optimizer: Optimizer to save (optional)
+        epoch: Current epoch
+        args: Training arguments
+        save_path: Path to save checkpoint
+        force_merge: Force merging even if not final epoch
+    """
+    import torch.distributed as dist
+    import time
+    from torch.distributed.fsdp import (
+        FullyShardedDataParallel as FSDP,
+        StateDictType,
+        ShardedStateDictConfig,
+    )
+
+    if save_path is None:
+        save_path = args.save_path
+
+    is_fsdp = isinstance(model, FSDP)
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank0 = rank == 0
+
+    if rank0:
+        print(f"\n--- Starting Checkpoint Save (Epoch {epoch + 1}) ---")
+    
+    total_start_time = time.time()
+
+    if is_fsdp:
+        # Use old API with deprecation warning suppression
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            
+            # 1. state_dict 생성
+            state_dict_start_time = time.time()
+            
+            cfg = ShardedStateDictConfig(offload_to_cpu=False)
+            with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT, cfg):
+                model_state_dict = model.state_dict()
+            
+            state_dict_duration = time.time() - state_dict_start_time
+            if rank0:
+                print(f"  [1/2] Model state_dict creation took: {state_dict_duration:.4f}s")
+            
+            # 2. 파일 저장 (optimizer 제외하여 속도 향상)
+            save_start_time = time.time()
+            shard_path = f"{save_path}.rank{rank}.pt"
+            torch.save({
+                'model': model_state_dict,
+                'epoch': epoch
+            }, shard_path)
+            save_duration = time.time() - save_start_time
+            
+            if rank0:
+                print(f"  [2/2] torch.save (rank {rank}) took: {save_duration:.4f}s")
+            
+    else:
+        # Standard saving for non-FSDP models
+        if rank0:
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+                'epoch': epoch
+            }, save_path)
+            print(f"✅ Standard checkpoint saved to {save_path}")
+
+    # Synchronize all ranks before merging
+    if dist.is_initialized():
+        dist.barrier()
+    
+    # 모든 rank에서 병합 수행
+    if is_fsdp:
+        if rank0:
+            merge_start_time = time.time()
+            success = merge_sharded_checkpoints(save_path, world_size, save_path)
+            if success:
+                merge_duration = time.time() - merge_start_time
+                print(f"✅ Merging completed in {merge_duration:.4f}s")
+                print(f"✅ Complete checkpoint saved to: {save_path}")
+        # synchronize so that non-zero ranks wait until merge is done
+        dist.barrier()
+
+    total_duration = time.time() - total_start_time
+    if rank0:
+        print(f"✅ Total checkpoint save time: {total_duration:.4f}s\n")
+
+ 
+def save_sharded_checkpoint(model: FSDP, optimizer, epoch: int, args, force_merge=False):
+    """
+    각 rank가 자기 shard만 .rank{r}.pt 파일로 저장하고 자동으로 병합합니다.
+    """
+    assert dist.is_initialized(), "Distributed not initialized"
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    
+    # Use timestamped save path if available
+    if hasattr(args, 'timestamped_save_path'):
+        save_base = args.timestamped_save_path.rstrip(".pt")
+    else:
+        save_base = args.save_path.rstrip(".pt")
+    
+    shard_path = f"{save_base}.rank{rank}.pt"
+
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        sharded_state = model.state_dict()
+
+    checkpoint = {
+        'model':     sharded_state,
+        'optimizer': optimizer.state_dict(),
+        'epoch':     epoch,
+    }
+    torch.save(checkpoint, shard_path)
+    print(f"(rank {rank}) ✅ Sharded checkpoint saved to: {shard_path}")
+
+    # Wait for all ranks to finish saving
+    dist.barrier()
+    
+    # Automatically merge shards on rank 0
+    if rank == 0:
+        print(f"🔄 Starting automatic merge of {world_size} shards...")
+        merge_start_time = time.time()
+        
+        # Determine output path
+        if hasattr(args, 'timestamped_save_path'):
+            output_path = args.timestamped_save_path
+        else:
+            output_path = args.save_path
+        
+        try:
+            # Try FSDP consolidation first (more reliable for FSDP models)
+            success = use_fsdp_consolidation(save_base, world_size, output_path)
+            
+            if not success:
+                # Fallback to manual merge
+                print("🔄 FSDP consolidation failed, trying manual merge...")
+                success = merge_sharded_checkpoints(save_base, world_size, output_path)
+            
+            if success:
+                merge_duration = time.time() - merge_start_time
+                print(f"✅ Automatic merge completed in {merge_duration:.2f}s")
+                print(f"📁 Merged checkpoint saved to: {output_path}")
+                
+                # Clean up shard files after successful merge
+                print("🧹 Cleaning up shard files...")
+                for r in range(world_size):
+                    shard_file = f"{save_base}.rank{r}.pt"
+                    if os.path.exists(shard_file):
+                        os.remove(shard_file)
+                        print(f"  Removed: {shard_file}")
+            else:
+                print("❌ Automatic merge failed!")
+                print("⚠️  Shard files will be preserved for manual merge")
+                
+        except Exception as e:
+            print(f"❌ Error during automatic merge: {e}")
+            print("⚠️  Shard files will be preserved for manual merge")
+    
+    # Wait for rank 0 to complete merging
+    dist.barrier()
+
+
+def load_sharded_checkpoint(model: FSDP, optimizer, save_path, map_location='cpu'):
+    """
+    각 rank가 자기 shard만 로드합니다.
+    """
+    assert dist.is_initialized(), "Distributed not initialized"
+    rank = dist.get_rank()
+    save_base = save_path.rstrip(".pt")
+    shard_path = f"{save_base}.rank{rank}.pt"
+
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        checkpoint = torch.load(
+            shard_path,
+            map_location=map_location,
+            weights_only=False
+        )
+        model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    epoch = checkpoint.get('epoch', 0)
+    print(f"(rank {rank}) ✅ Sharded checkpoint loaded from: {shard_path} (epoch={epoch})")
+
+    dist.barrier()
+    return epoch

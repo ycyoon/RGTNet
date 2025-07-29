@@ -153,16 +153,44 @@ else
 fi
 
 echo ""
+# Run benchmark with trained RGTNet models (if available)
+echo "🔥 Running benchmark with trained RGTNet models..."
+if [ -f "/home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth" ]; then
+    echo "🎯 Found trained RGTNet model, running benchmark..."
+    if python "${SCRIPT_DIR}/multi_model_benchmark.py" --trained-model rgtnet-epoch1 /home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth --use-local; then
+        echo "✅ Trained model benchmark completed successfully"
+        TRAINED_RESULT=$(ls -t multi_model_results_*.json 2>/dev/null | head -1)
+        [ -n "$TRAINED_RESULT" ] && RESULT_FILES+=("$TRAINED_RESULT")
+    else
+        echo "⚠️  Trained model benchmark encountered issues"
+    fi
+else
+    echo "⚠️  No trained RGTNet models found, skipping trained model benchmark"
+fi
+
+echo ""
 # Run the benchmark with PAIR attack (if available)
 echo "🔥 Running PAIR attack benchmark..."
 if python -c "import easyjailbreak.attacker.PAIR_chao_2023" 2>/dev/null; then
+    # Test with foundation model
     if python "${SCRIPT_DIR}/run_PAIR.py" --target-model llama-3.2-3b --dataset-size 10; then
-        echo "✅ PAIR attack completed successfully"
-        # Find the most recent PAIR result file
+        echo "✅ PAIR attack on foundation model completed successfully"
         PAIR_RESULT=$(ls -t PAIR_results_*.json 2>/dev/null | head -1)
         [ -n "$PAIR_RESULT" ] && RESULT_FILES+=("$PAIR_RESULT")
     else
-        echo "⚠️  PAIR attack encountered issues"
+        echo "⚠️  PAIR attack on foundation model encountered issues"
+    fi
+    
+    # Test with trained model (if available)
+    if [ -f "/home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth" ]; then
+        echo "🎯 Running PAIR attack on trained RGTNet model..."
+        if python "${SCRIPT_DIR}/run_PAIR.py" --use-trained-model --trained-model-path /home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth --dataset-size 10; then
+            echo "✅ PAIR attack on trained model completed successfully"
+            TRAINED_PAIR_RESULT=$(ls -t *trained*result*.jsonl 2>/dev/null | head -1)
+            [ -n "$TRAINED_PAIR_RESULT" ] && RESULT_FILES+=("$TRAINED_PAIR_RESULT")
+        else
+            echo "⚠️  PAIR attack on trained model encountered issues"
+        fi
     fi
 else
     echo "⚠️  PAIR attack module not available, skipping..."

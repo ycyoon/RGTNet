@@ -8,7 +8,8 @@ import time
 from tqdm import tqdm
 import os
 import torch.distributed as dist
-from model import load_checkpoint
+from datetime import datetime
+from model import load_checkpoint, load_sharded_checkpoint
 
 
 def cleanup_memory():
@@ -19,6 +20,22 @@ def cleanup_memory():
 
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
+
+def create_timestamped_save_path(base_path):
+    """Create timestamped save path with date and time"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Extract directory and filename from base_path
+    base_dir = os.path.dirname(base_path)
+    base_name = os.path.basename(base_path)
+    name_without_ext = os.path.splitext(base_name)[0]
+    ext = os.path.splitext(base_name)[1]
+    
+    # Create timestamped directory
+    timestamped_dir = os.path.join(base_dir, f"{name_without_ext}_{timestamp}")
+    os.makedirs(timestamped_dir, exist_ok=True)
+    
+    # Return the full path for the model file
+    return os.path.join(timestamped_dir, f"{name_without_ext}{ext}"), timestamped_dir
 
 def train_model(model, train_loader, val_loader, device, args, local_rank=0, logger=None):
     """Train the decoder-only (causal LM) model"""
@@ -47,22 +64,47 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
         'benchmark_results': []
     }
     
+    # Create timestamped save path
+    timestamped_save_path, timestamped_dir = create_timestamped_save_path(args.save_path)
+    args.timestamped_save_path = timestamped_save_path
+    args.timestamped_dir = timestamped_dir
+    
+    if is_main_process():
+        print(f"📁 Model will be saved to: {timestamped_dir}")
+        print(f"📄 Model file path: {timestamped_save_path}")
+        if logger:
+            logger.info(f"Model save directory: {timestamped_dir}")
+            logger.info(f"Model file path: {timestamped_save_path}")
+    
     start_epoch = 0
     if getattr(args, 'resume_from_checkpoint', None) and os.path.exists(args.resume_from_checkpoint):
         try:
-            # Pass is_main_process() to prevent duplicate logging
+            # Try to load as merged checkpoint first
+            from model import load_checkpoint
             start_epoch = load_checkpoint(model, optimizer, args.resume_from_checkpoint, device, is_main_process())
             if is_main_process():
-                print(f"Resuming training from checkpoint: {args.resume_from_checkpoint}")
+                print(f"✅ Resuming training from merged checkpoint: {args.resume_from_checkpoint}")
                 print(f"Starting from epoch {start_epoch}...")
         except Exception as e:
             if is_main_process():
-                print(f"⚠️  Failed to load checkpoint: {e}. Starting from scratch.")
-            start_epoch = 0
+                print(f"⚠️  Failed to load merged checkpoint: {e}")
+                print("   Trying to load as sharded checkpoint...")
+            
+            try:
+                # Try to load as sharded checkpoint
+                from model import load_sharded_checkpoint
+                start_epoch = load_sharded_checkpoint(model, optimizer, args.resume_from_checkpoint, device)
+                if is_main_process():
+                    print(f"✅ Resuming training from sharded checkpoint: {args.resume_from_checkpoint}")
+                    print(f"Starting from epoch {start_epoch}...")
+            except Exception as e2:
+                if is_main_process():
+                    print(f"⚠️  Failed to load sharded checkpoint: {e2}. Starting from scratch.")
+                start_epoch = 0
     elif getattr(args, 'resume', False) and os.path.exists(args.save_path):
         try:
             # Pass is_main_process() to prevent duplicate logging
-            start_epoch = load_checkpoint(model, optimizer, args.save_path, device, is_main_process())
+            start_epoch = load_sharded_checkpoint(model, optimizer, args.save_path, device, is_main_process())
             if is_main_process():
                 print(f"Resuming training from epoch {start_epoch}...")
         except Exception as e:
@@ -147,7 +189,14 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
         
         # After each epoch, evaluate
         avg_train_loss = total_loss / num_batches if num_batches > 0 else 0
-        val_loss = evaluate_model(model, val_loader, device, args)
+        
+        # Only run validation if not in train_only mode
+        if not getattr(args, 'train_only', False):
+            val_loss = evaluate_model(model, val_loader, device, args)
+        else:
+            val_loss = float('inf')  # Set to infinity when skipping validation
+            if is_main_process():
+                print("Skipping validation (train_only mode)")
         
         if is_main_process():
             training_stats['train_losses'].append(avg_train_loss)
@@ -155,36 +204,86 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
             training_stats['learning_rates'].append(scheduler.get_last_lr()[0])
             training_stats['epochs'].append(epoch + 1)
         
-        # Save checkpoint every epoch
+        # Save checkpoint logic - 매 epoch마다 완전한 checkpoint 저장
+        should_save = False
+        
+        # rank 0에서만 저장 여부 결정
         if is_main_process():
-            from model import save_checkpoint
-            epoch_ckpt_path = args.save_path.replace('.pth', f'_epoch{epoch+1}.pth')
-            save_checkpoint(model, optimizer, epoch, epoch_ckpt_path)
-
-        if is_main_process() and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            from model import save_checkpoint
-            # Corrected the arguments for save_checkpoint
-            save_checkpoint(model, optimizer, epoch, args.save_path)
-
-        # Run benchmark evaluation if enabled
-        if is_main_process() and getattr(args, 'enable_benchmark', False) and (epoch + 1) % getattr(args, 'benchmark_freq', 10) == 0:
-            if logger:
-                logger.info(f"Running benchmark evaluation at epoch {epoch + 1}")
-            try:
-                # Placeholder for benchmark evaluation - function not yet implemented
-                # benchmark_result = run_benchmark_evaluation(model, epoch + 1, device, args, logger)
-                # if benchmark_result:
-                #     training_stats['benchmark_results'].append(benchmark_result)
-                #     if logger:
-                #         logger.info(f"Benchmark completed: ASR = {benchmark_result.get('overall_asr', 'N/A')}")
+            if not getattr(args, 'train_only', False) and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                should_save = True
+                print(f"New best validation loss: {val_loss:.4f}")
+            elif getattr(args, 'train_only', False):
+                # train_only 모드에서는 매 epoch 저장
+                should_save = True
+        
+        # 저장 여부와 best_val_loss를 모든 rank에 브로드캐스트
+        if dist.is_initialized():
+            should_save_tensor = torch.tensor(should_save, device=device, dtype=torch.bool)
+            dist.broadcast(should_save_tensor, src=0)
+            should_save = should_save_tensor.item()
+            
+            # best_val_loss 브로드캐스트 (validation 모드일 때만)
+            if not getattr(args, 'train_only', False):
+                best_val_loss_tensor = torch.tensor(best_val_loss, device=device, dtype=torch.float32)
+                dist.broadcast(best_val_loss_tensor, src=0)
+                best_val_loss = best_val_loss_tensor.item()
+        
+        # 모든 rank가 참여하여 저장
+        if should_save:
+            from model import save_checkpoint, save_sharded_checkpoint
+            save_start_time = time.time()
+            
+            # Save sharded checkpoint and automatically merge
+            save_sharded_checkpoint(model, optimizer, epoch, args)
+            
+            # Wait for all processes to complete saving
+            if dist.is_initialized():
+                dist.barrier()
+            
+            save_duration = time.time() - save_start_time
+            
+            if is_main_process():
+                print(f"✅ Sharded checkpoint saved and merged at epoch {epoch+1} (took {save_duration:.2f}s)")
+                print(f"📁 Checkpoint location: {args.timestamped_dir}")
                 if logger:
-                    logger.info(f"Benchmark evaluation placeholder - epoch {epoch + 1}")
-            except Exception as e:
-                if logger:
-                    logger.warning(f"Benchmark evaluation failed: {e}")
-                print(f"Warning: Benchmark evaluation failed: {e}")
-
+                    logger.info(f"Checkpoint saved at epoch {epoch+1} in {args.timestamped_dir}")
+        
+        # Check if max_iters limit is reached
+        if hasattr(args, 'max_iters') and args.max_iters is not None and args.max_iters > 0:
+            total_iters = (epoch * len(train_loader)) + batch_idx + 1
+            if total_iters >= args.max_iters:
+                if is_main_process():
+                    print(f"\n⚠️  Reached max_iters limit ({args.max_iters}). Stopping training.")
+                    print("Saving final checkpoint before early termination...")
+                
+                # Save checkpoint on early termination
+                should_save_early = True
+                
+                # Broadcast early termination save decision
+                if dist.is_initialized():
+                    should_save_early_tensor = torch.tensor(should_save_early, device=device, dtype=torch.bool)
+                    dist.broadcast(should_save_early_tensor, src=0)
+                    should_save_early = should_save_early_tensor.item()
+                
+                # All ranks participate in checkpoint saving
+                if should_save_early:
+                    from model import save_checkpoint, save_sharded_checkpoint
+                    save_sharded_checkpoint(model, optimizer, epoch, args, force_merge=True)
+                    
+                    # Wait for all processes to complete saving
+                    if dist.is_initialized():
+                        dist.barrier()
+                    
+                    if is_main_process():
+                        print("✅ Early termination checkpoint saved and merged")
+                        print(f"📁 Checkpoint location: {args.timestamped_dir}")
+                        if logger:
+                            logger.info(f"Early termination checkpoint saved in {args.timestamped_dir}")
+                
+                should_break_epoch = True
+                break
+        
         epoch_time = time.time() - epoch_start_time
         
         if is_main_process():
@@ -212,7 +311,8 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
         'final_val_loss': training_stats['val_losses'][-1] if training_stats['val_losses'] else 0,
         'training_stats': training_stats,
         'total_epochs': args.epochs,
-        'model_path': args.save_path
+        'model_path': args.timestamped_save_path,
+        'model_dir': args.timestamped_dir
     }
     if is_main_process():
         print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
