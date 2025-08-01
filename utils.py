@@ -131,38 +131,43 @@ def log_final_performance(logger, results, model_path):
     logger.info("=" * 80)
     
     logger.info(f"Model saved to: {model_path}")
-    logger.info(f"Best validation loss: {results.get('best_val_loss', 'N/A'):.4f}")
-    logger.info(f"Final training loss: {results.get('final_train_loss', 'N/A'):.4f}")
-    logger.info(f"Final validation loss: {results.get('final_val_loss', 'N/A'):.4f}")
-    logger.info(f"Total epochs completed: {results.get('total_epochs', 'N/A')}")
     
-    # Log benchmark results if available
-    training_stats = results.get('training_stats', {})
-    benchmark_results = training_stats.get('benchmark_results', [])
-    
-    if benchmark_results:
-        logger.info("\nBenchmark Progress Summary:")
-        logger.info("-" * 40)
-        for result in benchmark_results:
-            epoch = result.get('epoch', 'N/A')
-            asr = result.get('overall_asr', 'N/A')
-            if asr != 'N/A':
-                logger.info(f"Epoch {epoch}: ASR = {asr:.4f}")
-            else:
-                logger.info(f"Epoch {epoch}: ASR = {asr}")
-    
-    # Log training statistics
-    train_losses = training_stats.get('train_losses', [])
-    val_losses = training_stats.get('val_losses', [])
-    
-    if train_losses and val_losses:
-        logger.info(f"\nTraining Statistics:")
-        logger.info(f"Initial train loss: {train_losses[0]:.4f}")
-        logger.info(f"Final train loss: {train_losses[-1]:.4f}")
-        logger.info(f"Train loss improvement: {train_losses[0] - train_losses[-1]:.4f}")
-        logger.info(f"Initial val loss: {val_losses[0]:.4f}")
-        logger.info(f"Final val loss: {val_losses[-1]:.4f}")
-        logger.info(f"Val loss improvement: {val_losses[0] - val_losses[-1]:.4f}")
+    # Safe access to results with None check
+    if results is not None:
+        logger.info(f"Best validation loss: {results.get('best_val_loss', 'N/A'):.4f}")
+        logger.info(f"Final training loss: {results.get('final_train_loss', 'N/A'):.4f}")
+        logger.info(f"Final validation loss: {results.get('final_val_loss', 'N/A'):.4f}")
+        logger.info(f"Total epochs completed: {results.get('total_epochs', 'N/A')}")
+        
+        # Log benchmark results if available
+        training_stats = results.get('training_stats', {})
+        benchmark_results = training_stats.get('benchmark_results', [])
+        
+        if benchmark_results:
+            logger.info("\nBenchmark Progress Summary:")
+            logger.info("-" * 40)
+            for result in benchmark_results:
+                epoch = result.get('epoch', 'N/A')
+                asr = result.get('overall_asr', 'N/A')
+                if asr != 'N/A':
+                    logger.info(f"Epoch {epoch}: ASR = {asr:.4f}")
+                else:
+                    logger.info(f"Epoch {epoch}: ASR = {asr}")
+        
+        # Log training statistics
+        train_losses = training_stats.get('train_losses', [])
+        val_losses = training_stats.get('val_losses', [])
+        
+        if train_losses and val_losses:
+            logger.info(f"\nTraining Statistics:")
+            logger.info(f"Initial train loss: {train_losses[0]:.4f}")
+            logger.info(f"Final train loss: {train_losses[-1]:.4f}")
+            logger.info(f"Train loss improvement: {train_losses[0] - train_losses[-1]:.4f}")
+            logger.info(f"Initial val loss: {val_losses[0]:.4f}")
+            logger.info(f"Final val loss: {val_losses[-1]:.4f}")
+            logger.info(f"Val loss improvement: {val_losses[0] - val_losses[-1]:.4f}")
+    else:
+        logger.info("No training results available")
     
     logger.info("=" * 80)
 

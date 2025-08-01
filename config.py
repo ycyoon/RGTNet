@@ -3,17 +3,26 @@ import os
 from pathlib import Path
 
 def setup_args():
-    """Setup command line arguments"""
-    parser = argparse.ArgumentParser(description='RGTNet Training')
+    """Setup command line arguments with improved checkpoint management"""
+    parser = argparse.ArgumentParser(description='RGTNet Training with DeepSpeed')
     
     # Model parameters - removed d_model, nhead, num_layers as they will be auto-detected from pretrained model
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
-    parser.add_argument('--max_seq_len', type=int, default=512, help='Maximum sequence length')
-    parser.add_argument('--bias_delta', type=float, default=1.0, help='Role-gated attention bias delta')
+    parser.add_argument('--max_seq_len', type=int, default=8192, help='Maximum sequence length')
+    parser.add_argument('--bias_delta', type=float, default=1.0, help='Role-gated attention bias delta (deprecated for PEFT)')
+    
+    # Hybrid model parameters
+    parser.add_argument('--enable_role_adapters', action='store_true', default=True, help='Enable RGTNet role-aware adapters')
+    parser.add_argument('--use_quantization', action='store_true', help='Use 4-bit quantization for memory efficiency')
+    parser.add_argument('--use_lora', action='store_true', help='Apply LoRA adapters to the base model')
+    
+    # PEFT/LoRA parameters (when use_lora is enabled)
+    parser.add_argument('--lora_r', type=int, default=8, help='LoRA rank (dimension of adapter)')
+    parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA scaling factor')
+    parser.add_argument('--lora_dropout', type=float, default=0.05, help='LoRA dropout rate')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
     parser.add_argument('--warmup_ratio', type=float, default=0.1, help='Warmup ratio')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
@@ -41,6 +50,19 @@ def setup_args():
     parser.add_argument('--train_only', action='store_true', help='Only run training')
     parser.add_argument('--eval_only', action='store_true', help='Only run evaluation')
     parser.add_argument('--device', type=str, default='auto', help='Device to use')
+    
+    # DeepSpeed parameters
+    parser.add_argument('--deepspeed', action='store_true', help='Use DeepSpeed for distributed training')
+    parser.add_argument('--deepspeed_config', type=str, default='ds_config.json', help='DeepSpeed configuration file')
+    
+    # Distributed training parameters
+    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
+    
+    # Checkpoint management
+    parser.add_argument('--auto_merge_checkpoint', action='store_true', default=True,
+                       help='Automatically merge DeepSpeed checkpoints after each save')
+    parser.add_argument('--unified_checkpoint_dir', type=str, default=None,
+                       help='Unified directory for all checkpoints')
     
     return parser.parse_args()
 
@@ -71,3 +93,74 @@ def create_directories(args):
     # Create other commonly used directories
     Path('models').mkdir(exist_ok=True)
     Path('evaluation_results').mkdir(exist_ok=True)
+
+def create_timestamped_save_path(base_path):
+    """Create a timestamped save path for checkpoints"""
+    import os
+    from datetime import datetime
+    
+    # Extract base name and extension
+    base_dir = os.path.dirname(base_path)
+    name_without_ext = os.path.splitext(os.path.basename(base_path))[0]
+    ext = os.path.splitext(base_path)[1]
+    
+    # Create timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create unified checkpoint directory (not timestamped for each save)
+    unified_dir = os.path.join(base_dir, f"{name_without_ext}_unified")
+    os.makedirs(unified_dir, exist_ok=True)
+    
+    # Create timestamped subdirectory for this specific checkpoint
+    timestamped_dir = os.path.join(unified_dir, f"checkpoint_{timestamp}")
+    os.makedirs(timestamped_dir, exist_ok=True)
+    
+    # Return both the unified directory and the specific checkpoint path
+    return os.path.join(timestamped_dir, f"{name_without_ext}{ext}"), timestamped_dir, unified_dir
+
+def merge_deepspeed_checkpoint(checkpoint_dir, output_dir, logger=None):
+    """Merge DeepSpeed checkpoint using zero_to_fp32.py"""
+    import os
+    import subprocess
+    import sys
+    
+    try:
+        # Check if zero_to_fp32.py exists in the checkpoint directory
+        zero_script = os.path.join(checkpoint_dir, "zero_to_fp32.py")
+        if not os.path.exists(zero_script):
+            print(f"⚠️  zero_to_fp32.py not found in {checkpoint_dir}")
+            return False
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Run zero_to_fp32.py
+        cmd = [
+            sys.executable, zero_script, 
+            checkpoint_dir, output_dir, 
+            "--safe_serialization"
+        ]
+        
+        print(f"🔄 Merging DeepSpeed checkpoint...")
+        print(f"Command: {' '.join(cmd)}")
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=checkpoint_dir)
+        
+        if result.returncode == 0:
+            print(f"✅ Successfully merged checkpoint to {output_dir}")
+            if logger:
+                logger.info(f"DeepSpeed checkpoint merged to {output_dir}")
+            return True
+        else:
+            print(f"❌ Failed to merge checkpoint:")
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
+            if logger:
+                logger.error(f"Failed to merge DeepSpeed checkpoint: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error during checkpoint merging: {e}")
+        if logger:
+            logger.error(f"Error during checkpoint merging: {e}")
+        return False

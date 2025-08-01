@@ -6,11 +6,14 @@ import os
 from pathlib import Path
 
 class InstructionDataset(Dataset):
+    """
+    Dataset for instruction-following fine-tuning using Llama-3 chat template.
+    Optimized for PEFT/LoRA training - no role masking needed.
+    """
     def __init__(self, data, tokenizer, max_length=512):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
-        # Store the actual vocabulary size to use for validation
         self.vocab_size = len(tokenizer)
         
     def __len__(self):
@@ -20,58 +23,67 @@ class InstructionDataset(Dataset):
         item = self.data[idx]
         instruction = item.get('instruction', '')
         input_text = item.get('input', '')
-        output = item.get('output', '')
+        response = item.get('response', item.get('output', ''))  # Support both field names
         
-        # Format: instruction + input (if exists) -> output
+        # Create conversation using Llama-3 chat template
         if input_text:
-            prompt = f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
+            user_message = f"{instruction}\n\n{input_text}"
         else:
-            prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
+            user_message = instruction
+            
+        # Format using chat template
+        messages = [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": response}
+        ]
         
-        full_text = prompt + output + self.tokenizer.eos_token
+        # Apply chat template (this handles special tokens automatically)
+        full_text = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=False
+        )
         
-        # Tokenize
+        # Tokenize the full conversation
         encoding = self.tokenizer(
-            full_text, 
-            truncation=True, 
-            padding='max_length', 
-            max_length=self.max_length, 
+            full_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
             return_tensors='pt'
         )
+        
         input_ids = encoding['input_ids'].squeeze()
         attention_mask = encoding['attention_mask'].squeeze()
         
-        # Critical: Comprehensive token validation to prevent CUDA indexing errors
-        vocab_size = self.vocab_size
+        # Validate tokens to prevent CUDA errors
+        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
         
-        # Step 1: Clamp all tokens to valid range
-        input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
-        
-        # Step 2: Additional validation with detailed logging
-        if torch.any(input_ids >= vocab_size) or torch.any(input_ids < 0):
-            print(f"Warning: Found invalid token IDs after clamping. Min: {input_ids.min().item()}, Max: {input_ids.max().item()}, Vocab size: {vocab_size}")
-            # Force clamp again as safety measure
-            input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
-        
-        # Step 3: Final validation
-        assert input_ids.min().item() >= 0, f"Negative token ID found: {input_ids.min().item()}"
-        assert input_ids.max().item() < vocab_size, f"Token ID {input_ids.max().item()} >= vocab_size {vocab_size}"
-        
+        # Create labels (copy of input_ids)
         labels = input_ids.clone()
         
-        # Mask the prompt part for loss calculation (only train on response)
-        prompt_encoding = self.tokenizer(
-            prompt, 
-            truncation=True, 
-            padding='max_length', 
-            max_length=self.max_length, 
+        # Mask the user prompt part (only train on assistant response)
+        user_only_messages = [{"role": "user", "content": user_message}]
+        user_text = self.tokenizer.apply_chat_template(
+            user_only_messages,
+            tokenize=False,
+            add_generation_prompt=True  # This adds the assistant prompt
+        )
+        
+        user_encoding = self.tokenizer(
+            user_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
             return_tensors='pt'
         )
-        prompt_len = (prompt_encoding['attention_mask'].squeeze() == 1).sum().item()
         
-        # Set labels to -100 for prompt tokens (ignore in loss)
-        if prompt_len < self.max_length:
-            labels[:prompt_len] = -100
+        # Find the length of the user prompt to mask it
+        user_prompt_len = (user_encoding['attention_mask'].squeeze() == 1).sum().item()
+        
+        # Mask prompt tokens in labels (set to -100 to ignore in loss)
+        if user_prompt_len < self.max_length:
+            labels[:user_prompt_len] = -100
         
         return {
             'input_ids': input_ids,
@@ -80,73 +92,115 @@ class InstructionDataset(Dataset):
         }
 
 class GenerationDataset(Dataset):
-    def __init__(self, data, tokenizer, max_length=512, num_roles=2):
+    """
+    Simplified dataset for causal language modeling with PEFT/LoRA.
+    Uses Llama-3 chat template format.
+    """
+    def __init__(self, data, tokenizer, max_length=512):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.num_roles = num_roles
-        # Store the actual vocabulary size to use for validation
-        self.vocab_size = len(tokenizer)  # Use len() for consistency with model
+        self.vocab_size = len(tokenizer)
+    
     def __len__(self):
         return len(self.data)
+    
     def __getitem__(self, idx):
         item = self.data[idx]
-        prompt = item.get('instruction', '')
-        output = item.get('output', '')
+        instruction = item.get('instruction', '')
+        input_text = item.get('input', '')
+        response = item.get('response', item.get('output', ''))
         
-        # Safe handling of eos_token
-        eos_token = self.tokenizer.eos_token if self.tokenizer.eos_token is not None else ''
+        # Create conversation using Llama-3 chat template
+        if input_text:
+            user_message = f"{instruction}\n\n{input_text}"
+        else:
+            user_message = instruction
+            
+        messages = [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": response}
+        ]
         
-        # 프롬프트와 정답을 이어붙여 causal LM 학습
-        full_text = prompt + eos_token + output + eos_token
-        encoding = self.tokenizer(full_text, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
+        # Apply chat template
+        full_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False
+        )
+        
+        # Tokenize
+        encoding = self.tokenizer(
+            full_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
+        
         input_ids = encoding['input_ids'].squeeze()
         
-        # Critical: Comprehensive token validation to prevent CUDA indexing errors
-        vocab_size = self.vocab_size  # Use stored vocab_size for consistency
+        # Validate tokens
+        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
         
-        # Step 1: Clamp all tokens to valid range
-        input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
-        
-        # Step 2: Additional validation with detailed logging
-        if torch.any(input_ids >= vocab_size) or torch.any(input_ids < 0):
-            print(f"Warning: Found invalid token IDs after clamping. Min: {input_ids.min().item()}, Max: {input_ids.max().item()}, Vocab size: {vocab_size}")
-            # Force clamp again as safety measure
-            input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
-        
-        # Step 3: Final validation
-        assert input_ids.min().item() >= 0, f"Negative token ID found: {input_ids.min().item()}"
-        assert input_ids.max().item() < vocab_size, f"Token ID {input_ids.max().item()} >= vocab_size {vocab_size}"
-        
+        # Create labels
         labels = input_ids.clone()
-        # 역할 정보: instruction 부분은 0(user), output 부분은 1(assistant)로 마킹
-        # 간단하게 prompt 길이까지 0, 그 이후 1로 설정
-        prompt_encoding = self.tokenizer(prompt + eos_token, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
-        prompt_len = (prompt_encoding['attention_mask'].squeeze() == 1).sum().item()
+        
+        # Calculate user prompt length for masking
+        user_only_messages = [{"role": "user", "content": user_message}]
+        user_text = self.tokenizer.apply_chat_template(
+            user_only_messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        user_encoding = self.tokenizer(
+            user_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
+        
+        user_prompt_len = (user_encoding['attention_mask'].squeeze() == 1).sum().item()
+        
+        # Mask prompt tokens in labels
+        if user_prompt_len < self.max_length:
+            labels[:user_prompt_len] = -100
+        
+        # Create role mask: user=0, assistant=1
         role_mask = torch.zeros(self.max_length, dtype=torch.long)
-        if prompt_len < self.max_length:
-            role_mask[prompt_len:] = 1
-        # 안전하게 0~num_roles-1로 clamp
-        role_mask = torch.clamp(role_mask, 0, self.num_roles-1)
-        return {'input_ids': input_ids, 'labels': labels, 'role_mask': role_mask}
+        if user_prompt_len < self.max_length:
+            role_mask[user_prompt_len:] = 1
+        
+        return {
+            'input_ids': input_ids,
+            'labels': labels,
+            'role_mask': role_mask
+        }
 
 def collate_generation_batch(batch):
+    """Collate function for generation dataset with role_mask"""
     input_ids = torch.stack([item['input_ids'] for item in batch])
     labels = torch.stack([item['labels'] for item in batch])
     role_mask = torch.stack([item['role_mask'] for item in batch])
     return {'input_ids': input_ids, 'labels': labels, 'role_mask': role_mask}
 
 def collate_instruction_batch(batch):
+    """Collate function for instruction dataset"""
     input_ids = torch.stack([item['input_ids'] for item in batch])
-    attention_mask = torch.stack([item['attention_mask'] for item in batch])
     labels = torch.stack([item['labels'] for item in batch])
-    return {'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels}
+    
+    if 'attention_mask' in batch[0]:
+        attention_mask = torch.stack([item['attention_mask'] for item in batch])
+        return {'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels}
+    else:
+        return {'input_ids': input_ids, 'labels': labels}
 
 def pad_to_multiple(data, multiple):
     n = len(data)
     if n % multiple != 0:
         extra = multiple - (n % multiple)
-        # deepcopy 대신 shallow copy로 충분 (dict)
         data += [data[0].copy() for _ in range(extra)]
     return data
 
@@ -199,13 +253,12 @@ def download_instruction_datasets():
             dataset = load_dataset(dataset_info['id'], split="train")
             sample_count = min(len(dataset), dataset_info['samples'])
             dataset = dataset.select(range(sample_count))
-            # all_data.extend(dataset[:sample_count])
+            
             if hasattr(dataset, 'keys') and 'train' in dataset:
-                # DatasetDict인 경우 train split만 사용
                 split_data = dataset['train']
             else:
                 split_data = dataset
-            # DatasetDict, IterableDatasetDict, IterableColumn 등은 list로 변환
+            
             try:
                 split_data_list = list(split_data)
                 n_samples = len(split_data_list)
@@ -218,45 +271,45 @@ def download_instruction_datasets():
             print(f"❌ Error loading {dataset_info['name']} dataset: {str(e)[:100]}...")
             continue
     
-    # If we have some data but not enough, add more dummy data
+    # Add dummy data if needed
     if len(all_data) < 1000:
         print(f"⚠️  Only {len(all_data)} samples loaded, adding dummy data for testing...")
         dummy_data = [
-            {"instruction": "What is the capital of France?", "output": "The capital of France is Paris."},
-            {"instruction": "Explain machine learning", "output": "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience without being explicitly programmed."},
-            {"instruction": "Write a simple Python function", "output": "def greet(name):\n    return f'Hello, {name}!'"},
-            {"instruction": "What is 2 + 2?", "output": "2 + 2 equals 4."},
-            {"instruction": "Tell me about the weather", "output": "I don't have access to real-time weather data, but I can help you understand weather patterns and concepts."},
-            {"instruction": "How do you make tea?", "output": "To make tea: 1) Boil water, 2) Add tea leaves or tea bag, 3) Steep for 3-5 minutes, 4) Remove tea leaves, 5) Add milk/sugar if desired."},
-            {"instruction": "What is Python?", "output": "Python is a high-level, interpreted programming language known for its simplicity and readability."},
-            {"instruction": "Explain photosynthesis", "output": "Photosynthesis is the process by which plants convert sunlight, carbon dioxide, and water into glucose and oxygen."},
-            {"instruction": "What is the meaning of life?", "output": "The meaning of life is a philosophical question that has been debated for centuries, with different people finding different answers."},
-            {"instruction": "How do computers work?", "output": "Computers work by processing binary data (0s and 1s) through electronic circuits, following programmed instructions to perform calculations and tasks."}
+            {"instruction": "What is the capital of France?", "response": "The capital of France is Paris."},
+            {"instruction": "Explain machine learning", "response": "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience without being explicitly programmed."},
+            {"instruction": "Write a simple Python function", "response": "def greet(name):\n    return f'Hello, {name}!'"},
+            {"instruction": "What is 2 + 2?", "response": "2 + 2 equals 4."},
+            {"instruction": "Tell me about the weather", "response": "I don't have access to real-time weather data, but I can help you understand weather patterns and concepts."},
+            {"instruction": "How do you make tea?", "response": "To make tea: 1) Boil water, 2) Add tea leaves or tea bag, 3) Steep for 3-5 minutes, 4) Remove tea leaves, 5) Add milk/sugar if desired."},
+            {"instruction": "What is Python?", "response": "Python is a high-level, interpreted programming language known for its simplicity and readability."},
+            {"instruction": "Explain photosynthesis", "response": "Photosynthesis is the process by which plants convert sunlight, carbon dioxide, and water into glucose and oxygen."},
+            {"instruction": "What is the meaning of life?", "response": "The meaning of life is a philosophical question that has been debated for centuries, with different people finding different answers."},
+            {"instruction": "How do computers work?", "response": "Computers work by processing binary data (0s and 1s) through electronic circuits, following programmed instructions to perform calculations and tasks."}
         ]
-        # Add enough dummy data to reach at least 1000 samples
+        
         needed_samples = max(1000 - len(all_data), 0)
         dummy_repeats = (needed_samples // len(dummy_data)) + 1
         all_data.extend(dummy_data * dummy_repeats)
         print(f"✅ Added {len(dummy_data * dummy_repeats)} dummy samples")
     
-    # If still no data, create dummy data for testing
+    # Create dummy data if still no data
     if not all_data:
         print("❌ No datasets were successfully loaded, creating dummy data for testing...")
         dummy_data = [
-            {"instruction": "What is the capital of France?", "output": "The capital of France is Paris."},
-            {"instruction": "Explain machine learning", "output": "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience without being explicitly programmed."},
-            {"instruction": "Write a simple Python function", "output": "def greet(name):\n    return f'Hello, {name}!'"},
-            {"instruction": "What is 2 + 2?", "output": "2 + 2 equals 4."},
-            {"instruction": "Tell me about the weather", "output": "I don't have access to real-time weather data, but I can help you understand weather patterns and concepts."}
+            {"instruction": "What is the capital of France?", "response": "The capital of France is Paris."},
+            {"instruction": "Explain machine learning", "response": "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience without being explicitly programmed."},
+            {"instruction": "Write a simple Python function", "response": "def greet(name):\n    return f'Hello, {name}!'"},
+            {"instruction": "What is 2 + 2?", "response": "2 + 2 equals 4."},
+            {"instruction": "Tell me about the weather", "response": "I don't have access to real-time weather data, but I can help you understand weather patterns and concepts."}
         ]
-        # Repeat dummy data to have enough samples
         all_data = dummy_data * 200  # 1000 samples total
     
     # Split into train and validation
     split_idx = int(len(all_data) * 0.9)
     train_data = all_data[:split_idx]
     val_data = all_data[split_idx:]
-    # DDP 환경에서 world_size(8)의 배수로 맞추기
+    
+    # Pad to multiple of world_size for DDP
     world_size = 8
     train_data = pad_to_multiple(train_data, world_size)
     val_data = pad_to_multiple(val_data, world_size)
@@ -268,36 +321,44 @@ def download_instruction_datasets():
     return train_data, val_data
 
 def create_data_loaders(train_dataset, val_dataset, tokenizer, args, train_sampler=None, val_sampler=None):
-    effective_batch_size = args.batch_size
+    """Create data loaders for PEFT training"""
+    effective_batch_size = 1  # DeepSpeed manages actual batch size
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
     num_workers = getattr(args, 'num_workers', 8)
+    
     if gpu_count > 1:
         print(f"DataParallel detected: Using {gpu_count} GPUs")
-        print(f"Effective batch size per GPU: {effective_batch_size}")
-        print(f"Total effective batch size: {effective_batch_size * gpu_count}")
+        print(f"DataLoader batch_size=1, actual batch size controlled by DeepSpeed config")
+    
+    # Use RGTNet collate function with role_mask
+    collate_fn = collate_generation_batch
+    print("Using RGTNet GenerationDataset with role-aware batch collation")
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=effective_batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        collate_fn=collate_generation_batch,
+        collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True
     )
+    
     val_loader = DataLoader(
         val_dataset,
         batch_size=effective_batch_size,
         shuffle=False,
         sampler=val_sampler,
-        collate_fn=collate_generation_batch,
+        collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True
     )
+    
     return train_loader, val_loader
 
-def load_data_from_files(train_file, val_file, tokenizer, args):
+def load_data_from_files(train_file, val_file):
     """Load data from files"""
     train_data = []
     val_data = []

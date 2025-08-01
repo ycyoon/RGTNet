@@ -29,12 +29,23 @@ handle_error() {
 # Set up error handler
 trap 'handle_error ${LINENO}' ERR
 
+# Find the latest RGTNet final model
+CURRENT_DATE=$(date +"%Y%m%d")
+TARGET_MODEL="/home/ycyoon/work/RGTNet/models/rgtnet_final_model_${CURRENT_DATE}"
+
+# If today's model doesn't exist, find the latest one
+if [ ! -d "$TARGET_MODEL" ]; then
+    TARGET_MODEL=$(find /home/ycyoon/work/RGTNet/models/ -name "rgtnet_final_model_*" -type d | sort -r | head -1)
+fi
+
+echo "🎯 Using RGTNet model: $TARGET_MODEL"
+
 # Get script directory (where this script is located)
 SCRIPT_DIR="/home/ycyoon/work/RGTNet/StructTransformBench/examples"
 
-# # Start servers
-# echo "📡 Starting vLLM servers for HuggingFace models..."
-# bash ./start_multi_model_servers.sh
+# Start servers
+echo "📡 Starting vLLM servers for HuggingFace models..."
+bash ./start_multi_model_servers.sh
 
 echo ""
 echo "⏳ Checking server status and waiting for readiness..."
@@ -141,60 +152,93 @@ echo ""
 # Track result files
 RESULT_FILES=()
 
-# First run the multi-model benchmark
-echo "🔥 Running multi-model benchmark..."
-if python "${SCRIPT_DIR}/multi_model_benchmark.py" --models llama-3.2-3b --use-local; then
-    echo "✅ Multi-model benchmark completed successfully"
-    # Find the most recent result file
-    MULTI_RESULT=$(ls -t multi_model_results_*.json 2>/dev/null | head -1)
-    [ -n "$MULTI_RESULT" ] && RESULT_FILES+=("$MULTI_RESULT")
+# # First run the multi-model benchmark
+# echo "🔥 Running multi-model benchmark..."
+# if python "${SCRIPT_DIR}/multi_model_benchmark.py" --models llama-3.2-3b --use-local; then
+#     echo "✅ Multi-model benchmark completed successfully"
+#     # Find the most recent result file
+#     MULTI_RESULT=$(ls -t multi_model_results_*.json 2>/dev/null | head -1)
+#     [ -n "$MULTI_RESULT" ] && RESULT_FILES+=("$MULTI_RESULT")
+# else
+#     echo "⚠️  Multi-model benchmark encountered issues, continuing..."
+# fi
+
+echo ""
+# Generate jailbreak dataset if it doesn't exist
+JAILBREAK_DATASET="jailbreak_dataset_full.json"
+if [ ! -f "$JAILBREAK_DATASET" ]; then
+    echo "🔥 Generating jailbreak attack dataset..."
+    if python "${SCRIPT_DIR}/generate_jailbreak_dataset.py" --output "$JAILBREAK_DATASET" --dataset-size 50 --methods PAIR WildteamAttack Jailbroken; then
+        echo "✅ Jailbreak dataset generation completed"
+    else
+        echo "⚠️  Jailbreak dataset generation failed, continuing without pre-generated dataset..."
+    fi
 else
-    echo "⚠️  Multi-model benchmark encountered issues, continuing..."
+    echo "✅ Using existing jailbreak dataset: $JAILBREAK_DATASET"
 fi
 
 echo ""
 # Run benchmark with trained RGTNet models (if available)
 echo "🔥 Running benchmark with trained RGTNet models..."
-if [ -f "/home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth" ]; then
-    echo "🎯 Found trained RGTNet model, running benchmark..."
-    if python "${SCRIPT_DIR}/multi_model_benchmark.py" --trained-model rgtnet-epoch1 /home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth --use-local; then
+if [ -d "$TARGET_MODEL" ]; then
+    echo "🎯 Found trained RGTNet model, running full benchmark with all templates..."
+    # Use --num_prompts -1 to test all templates instead of default 5
+    if python "${SCRIPT_DIR}/multi_model_benchmark.py" --trained-model rgtnet "$TARGET_MODEL" --use-local --num_prompts -1; then
         echo "✅ Trained model benchmark completed successfully"
         TRAINED_RESULT=$(ls -t multi_model_results_*.json 2>/dev/null | head -1)
         [ -n "$TRAINED_RESULT" ] && RESULT_FILES+=("$TRAINED_RESULT")
     else
         echo "⚠️  Trained model benchmark encountered issues"
     fi
+    
+    # If jailbreak dataset exists, also run dataset-based evaluation
+    if [ -f "$JAILBREAK_DATASET" ]; then
+        echo ""
+        echo "🎯 Running dataset-based jailbreak evaluation..."
+        
+        # Test different jailbreak methods
+        for METHOD in PAIR WildteamAttack Jailbroken; do
+            echo "🔄 Testing with $METHOD jailbreak method..."
+            if python "${SCRIPT_DIR}/run_PAIR.py" --use-jailbreak-dataset "$JAILBREAK_DATASET" --jailbreak-method "$METHOD" --use-trained-model --trained-model-path "$TARGET_MODEL" --dataset-size 20; then
+                echo "✅ $METHOD dataset-based evaluation completed"
+                DATASET_RESULT=$(ls -t *${METHOD}_dataset_result.jsonl 2>/dev/null | head -1)
+                [ -n "$DATASET_RESULT" ] && RESULT_FILES+=("$DATASET_RESULT")
+            else
+                echo "⚠️  $METHOD dataset-based evaluation encountered issues"
+            fi
+        done
+    fi
 else
     echo "⚠️  No trained RGTNet models found, skipping trained model benchmark"
 fi
 
-echo ""
-# Run the benchmark with PAIR attack (if available)
-echo "🔥 Running PAIR attack benchmark..."
-if python -c "import easyjailbreak.attacker.PAIR_chao_2023" 2>/dev/null; then
-    # Test with foundation model
-    if python "${SCRIPT_DIR}/run_PAIR.py" --target-model llama-3.2-3b --dataset-size 10; then
-        echo "✅ PAIR attack on foundation model completed successfully"
-        PAIR_RESULT=$(ls -t PAIR_results_*.json 2>/dev/null | head -1)
-        [ -n "$PAIR_RESULT" ] && RESULT_FILES+=("$PAIR_RESULT")
-    else
-        echo "⚠️  PAIR attack on foundation model encountered issues"
-    fi
+# echo ""
+# # Run the benchmark with PAIR attack (if available)
+# echo "🔥 Running PAIR attack benchmark..."
+# if python -c "import easyjailbreak.attacker.PAIR_chao_2023" 2>/dev/null; then
+#     # Test with foundation model
+#     if python "${SCRIPT_DIR}/run_PAIR.py" --target-model llama-3.2-3b --dataset-size 10; then
+#         echo "✅ PAIR attack on foundation model completed successfully"
+#         PAIR_RESULT=$(ls -t PAIR_results_*.json 2>/dev/null | head -1)
+#         [ -n "$PAIR_RESULT" ] && RESULT_FILES+=("$PAIR_RESULT")
+#     else
+#         echo "⚠️  PAIR attack on foundation model encountered issues"
+#     fi
     
-    # Test with trained model (if available)
-    if [ -f "/home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth" ]; then
-        echo "🎯 Running PAIR attack on trained RGTNet model..."
-        if python "${SCRIPT_DIR}/run_PAIR.py" --use-trained-model --trained-model-path /home/ycyoon/work/RGTNet/models/llama3.2_3b_rgtnet_epoch1.pth --dataset-size 10; then
-            echo "✅ PAIR attack on trained model completed successfully"
-            TRAINED_PAIR_RESULT=$(ls -t *trained*result*.jsonl 2>/dev/null | head -1)
-            [ -n "$TRAINED_PAIR_RESULT" ] && RESULT_FILES+=("$TRAINED_PAIR_RESULT")
-        else
-            echo "⚠️  PAIR attack on trained model encountered issues"
-        fi
-    fi
-else
-    echo "⚠️  PAIR attack module not available, skipping..."
-fi
+#     # Test with trained model (if available)
+#     if [ -f "$TARGET_MODEL" ]; then
+#         echo "🎯 Running PAIR attack on trained RGTNet model..."
+#         if python "${SCRIPT_DIR}/run_PAIR.py" --use-trained-model --trained-model-path "$TARGET_MODEL" --dataset-size 10; then
+#             echo "✅ PAIR attack on trained model completed successfully"
+#             TRAINED_PAIR_RESULT=$(ls -t *trained*result*.jsonl 2>/dev/null | head -1)
+#             [ -n "$TRAINED_PAIR_RESULT" ] && RESULT_FILES+=("$TRAINED_PAIR_RESULT")
+#         else
+#             echo "⚠️  PAIR attack on trained model encountered issues"
+#         fi
+#     fi
+# else
+#     echo "⚠️  PAIR attack module not available, skipping..."
+# fi
 
 # echo ""
 # echo "🔥 Running WildteamAttack benchmark..."
