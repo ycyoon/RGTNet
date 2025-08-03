@@ -36,6 +36,13 @@ from datetime import datetime
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from collections import defaultdict
 
+try:
+    from peft import PeftModel
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+    print("⚠️ PEFT not available, LoRA support disabled")
+
 # Import judge models from the existing benchmark
 from structtransform_benchmark import HarmBenchJudge, RefusalJudge, StructTransformDataset
 
@@ -98,6 +105,10 @@ class BaselineBenchmarkConfig:
     max_new_tokens: int = 128
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     batch_size: int = 1  # Usually 1 for foundation models to avoid OOM
+    
+    # LoRA adapter settings
+    lora_adapter_path: Optional[str] = None  # Path to LoRA adapters
+    use_lora: bool = False  # Whether to use LoRA adapters
     
     # StructTransform benchmark settings
     benchmark_dir: str = "StructTransformBench/benchmark"
@@ -171,10 +182,27 @@ class BaselineFoundationModelEvaluator:
                     "trust_remote_code": True
                 })
             
-            self.model = AutoModelForCausalLM.from_pretrained(
+            # Load base model
+            base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_name, 
                 **model_kwargs
             )
+            
+            # Load LoRA adapters if specified
+            if self.config.use_lora and self.config.lora_adapter_path and PEFT_AVAILABLE:
+                print(f"🎯 Loading LoRA adapters from: {self.config.lora_adapter_path}")
+                try:
+                    self.model = PeftModel.from_pretrained(base_model, self.config.lora_adapter_path)
+                    # Merge adapters for faster inference
+                    print("🔧 Merging adapters for faster inference...")
+                    self.model = self.model.merge_and_unload()
+                    print("✅ LoRA adapters loaded and merged successfully!")
+                except Exception as e:
+                    print(f"⚠️ Failed to load LoRA adapters: {e}")
+                    print("🔄 Using base model without adapters")
+                    self.model = base_model
+            else:
+                self.model = base_model
             
             # Move to device if device_map is not used
             if model_kwargs["device_map"] is None:
@@ -583,6 +611,12 @@ def main():
     parser.add_argument('--device', type=str, default='auto', help='Device to use (auto, cuda, cpu)')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size (usually 1 for foundation models)')
     
+    # LoRA parameters
+    parser.add_argument('--lora_adapter_path', type=str, default=None, 
+                       help='Path to LoRA adapter directory (e.g., ./models/lora_adapters_epoch_2)')
+    parser.add_argument('--use_lora', action='store_true', 
+                       help='Use LoRA adapters if lora_adapter_path is provided')
+    
     # Benchmark parameters
     parser.add_argument('--benchmark_dir', type=str, default='StructTransformBench/benchmark', 
                        help='StructTransform benchmark directory')
@@ -620,6 +654,8 @@ def main():
         max_new_tokens=args.max_new_tokens,
         device=args.device,
         batch_size=args.batch_size,
+        lora_adapter_path=args.lora_adapter_path,
+        use_lora=args.use_lora,
         benchmark_dir=args.benchmark_dir,
         judge_model_name=args.judge_model_name,
         refusal_model_name=args.refusal_model_name,

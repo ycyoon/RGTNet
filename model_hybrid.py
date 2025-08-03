@@ -223,6 +223,11 @@ def create_hybrid_model(args):
     
     # Apply LoRA if requested
     if getattr(args, 'use_lora', False):
+        print(f"🔍 Debug: Applying LoRA to model...")
+        print(f"🔍 Debug: Model type before LoRA: {type(model)}")
+        print(f"🔍 Debug: Base model type: {type(model.base_model)}")
+        print(f"🔍 Debug: Has PEFT config: {hasattr(model.base_model, 'peft_config')}")
+        
         # Check if LoRA is already applied
         if not hasattr(model.base_model, 'peft_config'):
             lora_r = getattr(args, 'lora_r', 8)
@@ -235,10 +240,15 @@ def create_hybrid_model(args):
                 bias="none",
                 task_type="CAUSAL_LM",
             )
+            print(f"🔧 Applying LoRA config: r={lora_r}, alpha={lora_alpha}")
             model.base_model = get_peft_model(model.base_model, lora_config)
             print(f"✅ LoRA adapters applied to base model (r={lora_r}, alpha={lora_alpha}, scaling={lora_alpha/lora_r})")
+            print(f"🔍 Debug: Base model type after LoRA: {type(model.base_model)}")
+            print(f"🔍 Debug: Has PEFT config after: {hasattr(model.base_model, 'peft_config')}")
         else:
             print("✅ LoRA adapters already applied")
+    else:
+        print("⚠️  LoRA not requested (use_lora=False)")
     
     return model, tokenizer
 

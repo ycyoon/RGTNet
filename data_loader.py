@@ -322,7 +322,40 @@ def download_instruction_datasets():
 
 def create_data_loaders(train_dataset, val_dataset, tokenizer, args, train_sampler=None, val_sampler=None):
     """Create data loaders for PEFT training"""
-    effective_batch_size = 1  # DeepSpeed manages actual batch size
+    
+    # DeepSpeed 설정 파일에서 배치 크기 정보 읽기
+    if hasattr(args, 'deepspeed_config') and args.deepspeed_config:
+        import json
+        import torch.distributed as dist
+        
+        try:
+            with open(args.deepspeed_config, 'r') as f:
+                ds_config = json.load(f)
+            
+            train_batch_size = ds_config.get('train_batch_size', 8)
+            gradient_accumulation_steps = ds_config.get('gradient_accumulation_steps', 4)
+            
+            # world_size 계산 (분산 학습 시)
+            if dist.is_initialized():
+                world_size = dist.get_world_size()
+            else:
+                world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+            
+            # micro_batch_size 계산
+            effective_batch_size = train_batch_size // (gradient_accumulation_steps * world_size)
+            
+            print(f"DeepSpeed batch configuration:")
+            print(f"  - train_batch_size: {train_batch_size}")
+            print(f"  - gradient_accumulation_steps: {gradient_accumulation_steps}")
+            print(f"  - world_size: {world_size}")
+            print(f"  - calculated micro_batch_size: {effective_batch_size}")
+            
+        except Exception as e:
+            print(f"Failed to read DeepSpeed config: {e}")
+            effective_batch_size = 1  # 폴백
+    else:
+        effective_batch_size = 1  # DeepSpeed 없을 때 기본값
+    
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
     num_workers = getattr(args, 'num_workers', 8)
     

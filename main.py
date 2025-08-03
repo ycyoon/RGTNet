@@ -3,32 +3,23 @@
 RGTNet Main Entry Point with DeepSpeed
 """
 import os
-import sys
 import time
-from datetime import timedelta
 from transformers import AutoTokenizer
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
-from functools import partial
 import argparse
 
 # DeepSpeed imports
 import deepspeed
-from deepspeed.utils import log_dist
 
 # Import our modules
-from config import setup_args, setup_environment, get_device, create_directories
+from config import setup_args, setup_environment, create_directories
 from model_hybrid import create_hybrid_model, create_model  # ✅ LoRA 지원 복원
-from data_loader import download_instruction_datasets, create_data_loaders, load_data_from_files, InstructionDataset, GenerationDataset
+from data_loader import download_instruction_datasets, create_data_loaders, load_data_from_files
 from trainer import train_model
 from evaluator import evaluate_model_detailed, save_evaluation_results, print_evaluation_summary
 from utils import set_seed, print_model_info, format_time, check_gpu_memory, save_results, setup_logging, log_final_performance, log_evaluation_results
-
-
-
-
 
 def main():
     """Main execution function"""
@@ -68,9 +59,8 @@ def main():
             
             # 🔧 FIX: 3개 반환값 모두 받기
             from trainer import create_timestamped_save_path
-            args.timestamped_save_path, args.timestamped_dir, args.unified_dir = create_timestamped_save_path(args.save_path, args.pretrained_model_name)
+            args.timestamped_dir = create_timestamped_save_path(args.save_path, args.pretrained_model_name)
             
-            print(f"📁 Unified checkpoint directory: {args.unified_dir}")
             print(f"📁 Timestamped directory: {args.timestamped_dir}")
 
         if is_ddp:
@@ -80,16 +70,12 @@ def main():
             if rank != 0:
                 # 더미 값으로 초기화 (브로드캐스트로 실제 값 받을 예정)
                 args.timestamped_dir = ""
-                args.unified_dir = ""
-                args.timestamped_save_path = ""
             
             # 문자열 브로드캐스트 (간단한 방법)
             import pickle
             if rank == 0:
                 path_data = {
                     'timestamped_dir': args.timestamped_dir,
-                    'unified_dir': args.unified_dir,
-                    'timestamped_save_path': args.timestamped_save_path
                 }
                 path_bytes = pickle.dumps(path_data)
                 path_size = len(path_bytes)
@@ -111,8 +97,6 @@ def main():
             if rank != 0:
                 path_data = pickle.loads(bytes(data_tensor.cpu().numpy()))
                 args.timestamped_dir = path_data['timestamped_dir']
-                args.unified_dir = path_data['unified_dir']
-                args.timestamped_save_path = path_data['timestamped_save_path']
         
         # Setup logging (only on main process)
         logger = setup_logging('logs', is_main_process=(rank == 0))
@@ -181,7 +165,7 @@ def main():
 
             
             # Initialize DeepSpeed
-            model, optimizer, _, _ = deepspeed.initialize(
+            model, _, _, _ = deepspeed.initialize(
                 args=ds_args,
                 model=model,
                 model_parameters=model.parameters(),
@@ -194,16 +178,14 @@ def main():
                 # Copy zero_to_fp32.py to unified checkpoint directory for later use
                 import shutil
                 zero_script_src = os.path.join(os.path.dirname(deepspeed.__file__), 
-                                             "checkpoint", "zero_to_fp32.py")
+                                             "utils", "zero_to_fp32.py")
                 if os.path.exists(zero_script_src):
-                    zero_script_dst = os.path.join(args.unified_dir, "zero_to_fp32.py")
+                    zero_script_dst = os.path.join(args.timestamped_dir, "zero_to_fp32.py")
                     shutil.copy2(zero_script_src, zero_script_dst)
                     print(f"📋 Copied zero_to_fp32.py to {zero_script_dst}")
                 else:
-                    print("⚠️  Could not find zero_to_fp32.py in DeepSpeed installation")
-        else:
-            # Standard optimizer for non-DeepSpeed training
-            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+                    print("⚠️  Could not find zero_to_fp32.py in",zero_script_src)
+
         
         # Data preparation
         train_data, val_data = None, None

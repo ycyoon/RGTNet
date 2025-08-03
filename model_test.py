@@ -2,12 +2,13 @@
 
 import torch
 from model_hybrid import create_hybrid_model
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import argparse
 import os
 import glob
 from safetensors.torch import load_file
 from datetime import datetime
+from peft import PeftModel
 
 def find_latest_model():
     """최신 모델 디렉토리 찾기"""
@@ -31,6 +32,49 @@ def find_latest_model():
     # 날짜와 시간으로 정렬 (최신순)
     model_dirs.sort(key=os.path.getctime, reverse=True)
     return model_dirs[0]
+
+def find_lora_adapters(model_dir):
+    """LoRA 어댑터 디렉토리 찾기"""
+    if not model_dir or not os.path.exists(model_dir):
+        return None
+    
+    # Look for LoRA adapter directories
+    adapter_pattern = os.path.join(model_dir, "lora_adapters_epoch_*")
+    adapter_dirs = glob.glob(adapter_pattern)
+    
+    if adapter_dirs:
+        # 가장 최신 epoch의 어댑터 반환
+        adapter_dirs.sort(key=lambda x: int(x.split('_')[-1]), reverse=True)
+        latest_adapter = adapter_dirs[0]
+        
+        # adapter_config.json이 있는지 확인
+        if os.path.exists(os.path.join(latest_adapter, "adapter_config.json")):
+            return latest_adapter
+    
+    return None
+
+def load_model_with_lora(base_model_name, adapter_path, device):
+    """베이스 모델에 LoRA 어댑터를 로드"""
+    try:
+        print(f"📦 Loading base model: {base_model_name}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=torch.float16,
+            device_map={"": device} if torch.cuda.is_available() else None
+        )
+        
+        print(f"🎯 Loading LoRA adapters from: {adapter_path}")
+        model = PeftModel.from_pretrained(base_model, adapter_path)
+        
+        # Optional: merge adapters for faster inference
+        print("🔧 Merging adapters for faster inference...")
+        model = model.merge_and_unload()
+        
+        return model
+        
+    except Exception as e:
+        print(f"❌ Error loading model with LoRA: {e}")
+        return None
 
 def list_available_models():
     """사용 가능한 모델들 목록 출력"""
@@ -71,8 +115,12 @@ def load_hybrid_model(model_dir):
     """Hybrid Llama-RGTNet 모델 로드"""
     print(f" Loading hybrid model from: {model_dir}")
     
-    # Check for PEFT adapter files
-    adapter_files = glob.glob(os.path.join(model_dir, "adapter_*.bin"))
+    # Check for PEFT adapter files (both .bin and .safetensors formats)
+    adapter_files = []
+    adapter_patterns = ["adapter_*.bin", "adapter_*.safetensors", "adapter_model.*"]
+    for pattern in adapter_patterns:
+        adapter_files.extend(glob.glob(os.path.join(model_dir, pattern)))
+    
     adapter_config = os.path.join(model_dir, "adapter_config.json")
     
     if adapter_files and os.path.exists(adapter_config):
@@ -258,15 +306,25 @@ def main():
         print("\n🔧 Creating single GPU test model...")
         model, tokenizer = create_single_gpu_hybrid_model(model_args)
         
-        # PEFT 어댑터가 있으면 로드
-        adapter_files = glob.glob(os.path.join(model_dir, "adapter_*.bin"))
-        if adapter_files:
-            print(f" Loading PEFT adapters from {model_dir}...")
-            # Note: In a real scenario, you'd use model.load_adapter() or similar
-            # For now, just indicate that adapters were found
-            print("✅ PEFT adapter files found (loading would require PEFT integration)")
+        # 🔧 MODIFIED: Check for and load LoRA adapters
+        adapter_path = find_lora_adapters(model_dir)
+        if adapter_path:
+            print(f"🎯 Found LoRA adapters: {adapter_path}")
+            # Try to load model with LoRA adapters
+            base_model_name = getattr(model_args, 'pretrained_model_name', 'meta-llama/Llama-3.2-3B-Instruct')
+            lora_model = load_model_with_lora(base_model_name, adapter_path, device)
+            
+            if lora_model is not None:
+                print("✅ Model with LoRA adapters loaded successfully!")
+                model = lora_model  # Use LoRA model instead of hybrid model
+                # Load tokenizer for the base model
+                tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
+            else:
+                print("⚠️ Failed to load LoRA adapters, using hybrid model")
+        else:
+            print("ℹ️ No LoRA adapters found, using hybrid model")
         
-        print("✅ Single GPU test model created successfully!")
+        print("✅ Model loading completed!")
         
         # 모델 정보 출력
         total_params = sum(p.numel() for p in model.parameters())
@@ -294,9 +352,18 @@ def main():
         test_role_mask = torch.randint(0, 2, (1, 10)).to(model_device)
         
         with torch.no_grad():
-            outputs = model(input_ids=test_input)
-            print(f"✅ Forward pass successful!")
-            print(f"Output shape: {outputs.logits.shape}")
+            # Different forward pass for LoRA vs hybrid models
+            if hasattr(model, 'base_model') and hasattr(model.base_model, 'peft_config'):
+                # Hybrid model with RGTNet - needs role_mask
+                outputs = model(input_ids=test_input, role_mask=test_role_mask)
+                print(f"✅ Forward pass successful (Hybrid RGTNet)!")
+                print(f"Output shape: {outputs.logits.shape}")
+            else:
+                # LoRA model - standard forward pass
+                outputs = model(input_ids=test_input)
+                print(f"✅ Forward pass successful (LoRA Model)!")
+                print(f"Output shape: {outputs.logits.shape}")
+            
             print(f"Expected shape: (1, 10, vocab_size)")
         
         # 생성 테스트

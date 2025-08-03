@@ -21,6 +21,11 @@ def setup_args():
     parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA scaling factor')
     parser.add_argument('--lora_dropout', type=float, default=0.05, help='LoRA dropout rate')
     
+    # Checkpoint saving options
+    parser.add_argument('--save_deepspeed_checkpoint', action='store_true', help='Save DeepSpeed checkpoints (for training resumption)')
+    parser.add_argument('--save_merged_model', action='store_true', help='Save merged model (converted from DeepSpeed checkpoint)')
+    parser.add_argument('--lora_only', action='store_true', default=True, help='Save only LoRA adapters (default: True)')
+    
     # Training parameters
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
@@ -94,29 +99,6 @@ def create_directories(args):
     Path('models').mkdir(exist_ok=True)
     Path('evaluation_results').mkdir(exist_ok=True)
 
-def create_timestamped_save_path(base_path):
-    """Create a timestamped save path for checkpoints"""
-    import os
-    from datetime import datetime
-    
-    # Extract base name and extension
-    base_dir = os.path.dirname(base_path)
-    name_without_ext = os.path.splitext(os.path.basename(base_path))[0]
-    ext = os.path.splitext(base_path)[1]
-    
-    # Create timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create unified checkpoint directory (not timestamped for each save)
-    unified_dir = os.path.join(base_dir, f"{name_without_ext}_unified")
-    os.makedirs(unified_dir, exist_ok=True)
-    
-    # Create timestamped subdirectory for this specific checkpoint
-    timestamped_dir = os.path.join(unified_dir, f"checkpoint_{timestamp}")
-    os.makedirs(timestamped_dir, exist_ok=True)
-    
-    # Return both the unified directory and the specific checkpoint path
-    return os.path.join(timestamped_dir, f"{name_without_ext}{ext}"), timestamped_dir, unified_dir
 
 def merge_deepspeed_checkpoint(checkpoint_dir, output_dir, logger=None):
     """Merge DeepSpeed checkpoint using zero_to_fp32.py"""

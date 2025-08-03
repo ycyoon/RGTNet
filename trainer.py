@@ -13,6 +13,7 @@ import deepspeed
 import shutil
 import json
 from transformers import AutoTokenizer, AutoConfig
+from datetime import timezone, timedelta
 # PEFT models handle checkpointing through the transformers/peft libraries
 
 
@@ -224,50 +225,29 @@ def _verify_config_files(output_dir, logger=None):
     
     return all_success
 
-def create_timestamped_save_path(base_path, pretrained_model_name=None):
+def create_timestamped_save_path(base_path, pretrained_model_name):
     """Create a timestamped save path for checkpoints with pretrained model name"""
     import os
-    from datetime import datetime
-    
-    # Extract base name and extension
-    base_dir = os.path.dirname(base_path)
-    name_without_ext = os.path.splitext(os.path.basename(base_path))[0]
-    ext = os.path.splitext(base_path)[1]
+    from datetime import datetime, timezone, timedelta
     
     # Create model name for directory
-    if pretrained_model_name:
-        # Extract model name from full path (e.g., "meta-llama/Llama-3.2-3B-Instruct" -> "llama-3.2-3b")
-        model_name = pretrained_model_name.split('/')[-1].lower()
-        # Clean up model name for folder use
-        model_name = model_name.replace('_', '-').replace(' ', '-')
-        # Construct folder name with model info
-        folder_name = f"rgtnet_{model_name}"
-    else:
-        folder_name = name_without_ext
+    # Extract model name from full path (e.g., "meta-llama/Llama-3.2-3B-Instruct" -> "llama-3.2-3b")
+    model_name = pretrained_model_name.split('/')[-1].lower()
+    # Clean up model name for folder use
+    model_name = model_name.replace('_', '-').replace(' ', '-')
     
     # Add timestamp to folder name
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unified_dir_name = f"{folder_name}_{timestamp}"
+    # korean time zone
+    timestamp = datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d_%H%M")
     
-    # Create unified checkpoint directory
-    unified_dir = os.path.join(base_dir, unified_dir_name)
-    os.makedirs(unified_dir, exist_ok=True)
-    
-    # Create timestamped subdirectory for this specific checkpoint
-    timestamped_dir = os.path.join(unified_dir, f"checkpoint_{timestamp}")
+    # Construct final folder name with model info and timestamp
+    folder_name = f"rgtnet_{model_name}_{timestamp}"
+    timestamped_dir = os.path.join(base_path, folder_name)
+        
     os.makedirs(timestamped_dir, exist_ok=True)
     
-    # Return both the unified directory and the specific checkpoint path
-    return os.path.join(timestamped_dir, f"{name_without_ext}{ext}"), timestamped_dir, unified_dir
-
-def create_latest_file(checkpoint_dir, tag):
-    """Create latest file for DeepSpeed checkpoint"""
-    import os
-    
-    latest_file = os.path.join(checkpoint_dir, "latest")
-    with open(latest_file, 'w') as f:
-        f.write(tag)
-    print(f"📝 Created latest file: {latest_file} -> {tag}")
+    print(f"📁 Created save directory: {timestamped_dir}")
+    return timestamped_dir
 
 def merge_deepspeed_checkpoint(checkpoint_dir, output_dir, logger=None):
     """Merge DeepSpeed checkpoint using zero_to_fp32.py"""
@@ -360,6 +340,17 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
         model.train()
         total_loss = 0
         num_batches = 0
+
+        print(f"🔍 Debug: Checking model structure...")
+        print(f"🔍 Debug: Model type: {type(model)}")
+        print(f"🔍 Debug: hasattr(model, 'module'): {hasattr(model, 'module')}")
+        print(f"🔍 Debug: hasattr(model, 'base_model'): {hasattr(model, 'base_model')}")
+        
+        # DeepSpeed wraps model in engine.module
+        actual_model = model.module if hasattr(model, 'module') else model
+        print(f"🔍 Debug: Actual model type: {type(actual_model)}")
+        print(f"🔍 Debug: Actual model has base_model: {hasattr(actual_model, 'base_model')}")
+        adapter_save_dir = os.path.join(args.timestamped_dir, f"lora_adapters_epoch_{epoch}")
         
         # Create progress bar for main process only
         if is_main_process():
@@ -374,12 +365,30 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
                     print(f"Reached max_iters ({args.max_iters}), stopping training")
                 
                 # Save checkpoint on early termination
-                if hasattr(model, 'save_checkpoint'):  # DeepSpeed
-                    model.save_checkpoint(args.timestamped_dir, tag=f"epoch_{epoch}")
-                    if dist.is_initialized():
-                        dist.barrier()
-                    if is_main_process():
-                        print("✅ Early termination checkpoint saved")
+                # if hasattr(model, 'save_checkpoint'):  # DeepSpeed
+                #     model.save_checkpoint(args.timestamped_dir, tag=f"epoch_{epoch}")
+                #     if dist.is_initialized():
+                #         dist.barrier()
+                #     if is_main_process():
+                #         print("✅ Early termination checkpoint saved")
+
+                if hasattr(actual_model, 'base_model') and hasattr(actual_model.base_model, 'peft_config'):
+                    print(f"🎯 Found PEFT model, saving LoRA adapters...")
+                    actual_model.base_model.save_pretrained(adapter_save_dir)
+                    print(f"✅ LoRA adapters saved to: {adapter_save_dir}")
+                    print(f"📁 LoRA location: {adapter_save_dir}")
+                    
+                    if logger:
+                        logger.info(f"LoRA adapters saved to: {adapter_save_dir}")
+                else:
+                    print(f"⚠️ No PEFT model found! Cannot save LoRA adapters.")
+                    print(f"   Model has module: {hasattr(model, 'module')}")
+                    print(f"   Actual model has base_model: {hasattr(actual_model, 'base_model')}")
+                    if hasattr(actual_model, 'base_model'):
+                        print(f"   Base model has peft_config: {hasattr(actual_model.base_model, 'peft_config')}")
+                    
+                    if logger:
+                        logger.warning(f"No PEFT model found - cannot save LoRA adapters")
                 
                 # Early return with results
                 return {
@@ -433,16 +442,17 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
             training_stats['learning_rates'].append(model.get_lr()[0] if hasattr(model, 'get_lr') else 0.0)
             training_stats['epochs'].append(epoch + 1)
         
-        # 🔧 FIX: 기존 저장 로직 유지 (이 부분은 그대로 두세요!)
-        should_save = False
+        # 🔧 FIX: 매 epoch마다 저장하도록 수정
+        should_save = True  # 매 epoch마다 저장
         
         if is_main_process():
             if not getattr(args, 'train_only', False) and val_loss < best_val_loss:
                 best_val_loss = val_loss
-                should_save = True
                 print(f"New best validation loss: {val_loss:.4f}")
             elif getattr(args, 'train_only', False):
-                should_save = True
+                print(f"Training only mode - saving checkpoint")
+            else:
+                print(f"Regular checkpoint save at epoch {epoch+1}")
         
         # 저장 여부와 best_val_loss를 모든 rank에 브로드캐스트
         if dist.is_initialized():
@@ -457,75 +467,118 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
                 best_val_loss = best_val_loss_tensor.item()
         
         # 모든 rank가 참여하여 저장
-        if should_save:
-            save_start_time = time.time()
+        save_start_time = time.time()
+        
+        # 🔧 ADD: 디버깅 - 저장 디렉토리 확인
+        if is_main_process():
+            print(f"🔍 Debug: Saving to directory: {args.timestamped_dir}")
+            print(f"🔍 Debug: Directory exists: {os.path.exists(args.timestamped_dir)}")
+            if not os.path.exists(args.timestamped_dir):
+                print(f"🔧 Creating directory: {args.timestamped_dir}")
+                os.makedirs(args.timestamped_dir, exist_ok=True)
+        
+        # Conditional checkpoint saving based on args
+        if getattr(args, 'save_deepspeed_checkpoint', False) and hasattr(model, 'save_checkpoint'):  
+            # Save DeepSpeed checkpoint only if explicitly requested
+            tag = f"epoch_{epoch}"
+            model.save_checkpoint(args.timestamped_dir, tag=tag)
             
-            # Checkpoint saving
-            if hasattr(model, 'save_checkpoint'):  # DeepSpeed
-                tag = f"epoch_{epoch}"
-                model.save_checkpoint(args.timestamped_dir, tag=tag)
-                
-                # Create latest file for DeepSpeed checkpoint
-                if is_main_process():
-                    create_latest_file(args.timestamped_dir, tag)
-
-                    # 🔧 FIX: 스크립트를 체크포인트가 저장된 폴더에 바로 복사합니다.
-                    import shutil
-                    try:
-                        zero_script_src = os.path.join(os.path.dirname(deepspeed.__file__), 
-                                                     "checkpoint", "zero_to_fp32.py")
-                        if os.path.exists(zero_script_src):
-                            shutil.copy2(zero_script_src, args.timestamped_dir)
-                            if logger:
-                                logger.info(f"Copied zero_to_fp32.py to {args.timestamped_dir}")
-                    except Exception as e:
-                        if logger:
-                            logger.warning(f"Could not copy zero_to_fp32.py: {e}")
-
-            # Wait for all processes to complete saving
-            if dist.is_initialized():
-                dist.barrier()
-            
-            # 🔧 FIX: 저장 완료 후 잠시 대기 (파일 시스템 동기화)
-            time.sleep(1)  # 1초 대기
-            
-            save_duration = time.time() - save_start_time
-            
+            # Create latest file for DeepSpeed checkpoint
             if is_main_process():
-                checkpoint_type = "DeepSpeed" if hasattr(model, 'save_checkpoint') else "Standard"
+                print(f"✅ DeepSpeed checkpoint saved to: {args.timestamped_dir}/{tag}")
+
+                # 🔧 FIX: 스크립트를 체크포인트가 저장된 폴더에 바로 복사합니다.
+                import shutil
+                try:
+                    zero_script_src = os.path.join(os.path.dirname(deepspeed.__file__), 
+                                                    "checkpoint", "zero_to_fp32.py")
+                    if os.path.exists(zero_script_src):
+                        shutil.copy2(zero_script_src, args.timestamped_dir)
+                        if logger:
+                            logger.info(f"Copied zero_to_fp32.py to {args.timestamped_dir}")
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Could not copy zero_to_fp32.py: {e}")
+
+        # Wait for all processes to complete saving
+        if dist.is_initialized():
+            dist.barrier()
+        
+        # 🔧 FIX: 저장 완료 후 잠시 대기 (파일 시스템 동기화)
+        time.sleep(1)  # 1초 대기
+        
+        save_duration = time.time() - save_start_time
+        
+        # Conditional model merging (only if DeepSpeed checkpoint was saved)
+        if getattr(args, 'save_merged_model', False) and getattr(args, 'save_deepspeed_checkpoint', False):
+            if is_main_process():
+                checkpoint_type = "DeepSpeed"
                 print(f"✅ {checkpoint_type} checkpoint saved at epoch {epoch+1} (took {save_duration:.2f}s)")
                 print(f"📁 Checkpoint location: {args.timestamped_dir}")
                 if logger:
                     logger.info(f"Checkpoint saved at epoch {epoch+1} in {args.timestamped_dir}")
             
-            # Auto-merge DeepSpeed checkpoint if enabled
-            if hasattr(model, 'save_checkpoint') and getattr(args, 'auto_merge_checkpoint', True):
-                # 🔧 FIX: rank 0에서만 병합 수행
-                if is_main_process():
-                    # unified_dir 안전하게 처리
-                    if hasattr(args, 'unified_dir') and args.unified_dir:
-                        merge_output_dir = os.path.join(args.unified_dir, f"merged_epoch_{epoch}")
-                    else:
-                        merge_output_dir = os.path.join(os.path.dirname(args.timestamped_dir), f"merged_epoch_{epoch}")
-                    
-                    success = merge_deepspeed_checkpoint(args.timestamped_dir, merge_output_dir, logger)
-                    if success:
-                        print(f"✅ Merged model saved to: {merge_output_dir}")
-                        args.latest_merged_checkpoint = merge_output_dir
-                        
-                        # Create HuggingFace config files
-                        if tokenizer is not None:
-                            config_success = create_huggingface_config_files(model, tokenizer, merge_output_dir, logger)
-                            if config_success:
-                                print(f"✅ HuggingFace config files created in: {merge_output_dir}")
-                            else:
-                                print(f"⚠️ Failed to create some HuggingFace config files in: {merge_output_dir}")
-                        else:
-                            print("⚠️ Tokenizer not provided, skipping HuggingFace config file creation")
+                # 모델 병합
+                merge_output_dir = os.path.join(os.path.dirname(args.timestamped_dir), f"merged_epoch_{epoch}")
                 
+                success = merge_deepspeed_checkpoint(args.timestamped_dir, merge_output_dir, logger)
+                if success:
+                    print(f"✅ Merged model saved to: {merge_output_dir}")
+                    args.latest_merged_checkpoint = merge_output_dir
+                    
+                    # Create HuggingFace config files
+                    if tokenizer is not None:
+                        config_success = create_huggingface_config_files(model, tokenizer, merge_output_dir, logger)
+                        if config_success:
+                            print(f"✅ HuggingFace config files created in: {merge_output_dir}")
+                        else:
+                            print(f"⚠️ Failed to create some HuggingFace config files in: {merge_output_dir}")
+                    else:
+                        print("⚠️ Tokenizer not provided, skipping HuggingFace config file creation")
+            
                 # 모든 프로세스가 병합 완료까지 대기
                 if dist.is_initialized():
                     dist.barrier()
+        
+        # 🔧 MODIFIED: Save LoRA adapters (default behavior when LoRA is used) 
+        if is_main_process():
+
+            
+            if hasattr(actual_model, 'base_model'):
+                print(f"🔍 Debug: hasattr(actual_model.base_model, 'peft_config'): {hasattr(actual_model.base_model, 'peft_config')}")
+                print(f"🔍 Debug: Base model type: {type(actual_model.base_model)}")
+            
+            try:
+                # Save LoRA adapters
+                
+                if hasattr(actual_model, 'base_model') and hasattr(actual_model.base_model, 'peft_config'):
+                    print(f"🎯 Found PEFT model, saving LoRA adapters...")
+                    actual_model.base_model.save_pretrained(adapter_save_dir)
+                    print(f"✅ LoRA adapters saved to: {adapter_save_dir}")
+                    print(f"📁 LoRA location: {adapter_save_dir}")
+                    
+                    if logger:
+                        logger.info(f"LoRA adapters saved to: {adapter_save_dir}")
+                else:
+                    print(f"⚠️ No PEFT model found! Cannot save LoRA adapters.")
+                    print(f"   Model has module: {hasattr(model, 'module')}")
+                    print(f"   Actual model has base_model: {hasattr(actual_model, 'base_model')}")
+                    if hasattr(actual_model, 'base_model'):
+                        print(f"   Base model has peft_config: {hasattr(actual_model.base_model, 'peft_config')}")
+                    
+                    if logger:
+                        logger.warning(f"No PEFT model found - cannot save LoRA adapters")
+                        
+            except Exception as e:
+                print(f"⚠️ Failed to save LoRA adapters: {e}")
+                import traceback
+                traceback.print_exc()
+                if logger:
+                    logger.warning(f"Failed to save LoRA adapters: {e}")
+            
+        # 모든 프로세스가 LoRA 저장 완료까지 대기
+        if dist.is_initialized():
+            dist.barrier()
 
         # 🔧 FIX: epoch 로그를 올바른 위치로 이동
         epoch_time = time.time() - epoch_start_time

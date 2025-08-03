@@ -1789,10 +1789,22 @@ class MultiModelBenchmarkRunner:
                            os.path.exists(os.path.join(model_path, "pytorch_model.bin.index.json")) and
                            os.path.exists(os.path.join(model_path, "config.json")))
         
-        # Check if it's a LoRA adapter (has weights but no config)
+        # Check if it's a LoRA adapter directory
         is_lora_adapter = (os.path.isdir(model_path) and 
-                          os.path.exists(os.path.join(model_path, "pytorch_model.bin.index.json")) and
-                          not os.path.exists(os.path.join(model_path, "config.json")))
+                          os.path.exists(os.path.join(model_path, "adapter_config.json")))
+        
+        # Check if it's a directory containing LoRA adapters (like timestamped_dir with lora_adapters_epoch_X)
+        lora_adapter_path = None
+        if os.path.isdir(model_path):
+            # Look for LoRA adapter subdirectories
+            for item in os.listdir(model_path):
+                if item.startswith("lora_adapters_epoch_"):
+                    potential_path = os.path.join(model_path, item)
+                    if os.path.exists(os.path.join(potential_path, "adapter_config.json")):
+                        lora_adapter_path = potential_path
+                        is_lora_adapter = True
+                        print(f"🔍 Found LoRA adapters: {lora_adapter_path}")
+                        break
         
         # Check if we can handle this type of checkpoint
         if not is_hf_checkpoint and not is_lora_adapter and not RGTNET_AVAILABLE:
@@ -1806,8 +1818,10 @@ class MultiModelBenchmarkRunner:
             print("✅ HuggingFace checkpoints can be loaded without RGTNet modules")
             checkpoint_type = "hf_checkpoint"
         elif is_lora_adapter:
-            display_name = f"RGTNet-LoRA-{os.path.basename(model_path)}"
-            print(f"🎯 Detected LoRA adapter checkpoint: {model_path}")
+            # Use the actual LoRA adapter path if found in subdirectory
+            actual_path = lora_adapter_path if lora_adapter_path else model_path
+            display_name = f"RGTNet-LoRA-{os.path.basename(actual_path)}"
+            print(f"🎯 Detected LoRA adapter checkpoint: {actual_path}")
             print("✅ LoRA adapters can be loaded with base model + PEFT")
             checkpoint_type = "lora_adapter"
         else:
@@ -1816,7 +1830,8 @@ class MultiModelBenchmarkRunner:
             checkpoint_type = "traditional"
         
         self.trained_models[model_key] = {
-            "model_path": model_path,
+            "model_path": lora_adapter_path if lora_adapter_path else model_path,  # Use actual LoRA path
+            "original_path": model_path,  # Keep original path for reference
             "pretrained_model_name": pretrained_model_name,
             "display_name": display_name,
             "category": "trained",
@@ -1981,7 +1996,7 @@ class MultiModelBenchmarkRunner:
                 tokenizer.pad_token = tokenizer.eos_token
             
             # Create a wrapper class that matches HuggingFaceModel interface
-            class LoRAModelWrapper:
+            class LoRAModelWrapper(ModelBase):
                 def __init__(self, model, tokenizer):
                     self.model = model
                     self.tokenizer = tokenizer
@@ -2879,7 +2894,6 @@ class MultiModelBenchmarkRunner:
                             print(f"   🔍 Calculating refusal rate with WildGuard...")
                             # Get target responses from the saved results
                             if os.path.exists(pkl_save_path):
-                                import pickle
                                 with open(pkl_save_path, 'rb') as f:
                                     saved_responses = pickle.load(f)
                                 
