@@ -9,10 +9,11 @@ def setup_args():
     # Model parameters - removed d_model, nhead, num_layers as they will be auto-detected from pretrained model
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--max_seq_len', type=int, default=8192, help='Maximum sequence length')
-    parser.add_argument('--bias_delta', type=float, default=1.0, help='Role-gated attention bias delta (deprecated for PEFT)')
     
     # Hybrid model parameters
-    parser.add_argument('--enable_role_adapters', action='store_true', default=True, help='Enable RGTNet role-aware adapters')
+    parser.add_argument('--enable_role_adapters', action='store_true', default=False, help='Enable RGTNet role-aware adapters')
+    parser.add_argument('--use_explicit_bias', action='store_true', help='Use explicit role-gated attention with bias')
+    parser.add_argument('--bias_delta', type=float, default=1.0, help='Bias delta parameter for role-gated attention')
     parser.add_argument('--use_quantization', action='store_true', help='Use 4-bit quantization for memory efficiency')
     parser.add_argument('--use_lora', action='store_true', help='Apply LoRA adapters to the base model')
     
@@ -24,7 +25,7 @@ def setup_args():
     # Checkpoint saving options
     parser.add_argument('--save_deepspeed_checkpoint', action='store_true', help='Save DeepSpeed checkpoints (for training resumption)')
     parser.add_argument('--save_merged_model', action='store_true', help='Save merged model (converted from DeepSpeed checkpoint)')
-    parser.add_argument('--lora_only', action='store_true', default=True, help='Save only LoRA adapters (default: True)')
+    parser.add_argument('--lora_only', action='store_true', default=False, help='Save only LoRA adapters (default: False)')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')

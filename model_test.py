@@ -145,7 +145,7 @@ def create_hybrid_model_args():
         pretrained_model_name="meta-llama/Llama-3.2-3B-Instruct",
         enable_role_adapters=True,
         use_quantization=False,
-        use_lora=True,  # Enable LoRA for testing
+        use_lora=False,  # Disable LoRA by default
         lora_r=8,
         lora_alpha=16,
         lora_dropout=0.05,

@@ -134,7 +134,20 @@ def main():
             print("Creating model...")
         
         # Use hybrid model for LoRA support
-        if getattr(args, 'use_lora', False) or getattr(args, 'enable_role_adapters', False):
+        use_lora_value = getattr(args, 'use_lora', False)
+        enable_role_adapters_value = getattr(args, 'enable_role_adapters', False)
+        
+        if rank == 0:
+            print(f"🔍 Debug: use_lora = {use_lora_value}")
+            print(f"🔍 Debug: enable_role_adapters = {enable_role_adapters_value}")
+            print(f"🔍 Debug: hasattr(args, 'use_lora') = {hasattr(args, 'use_lora')}")
+            print(f"🔍 Debug: hasattr(args, 'enable_role_adapters') = {hasattr(args, 'enable_role_adapters')}")
+            if hasattr(args, 'use_lora'):
+                print(f"🔍 Debug: args.use_lora = {args.use_lora}")
+            if hasattr(args, 'enable_role_adapters'):
+                print(f"🔍 Debug: args.enable_role_adapters = {args.enable_role_adapters}")
+        
+        if use_lora_value or enable_role_adapters_value:
             if rank == 0:
                 print("Using hybrid model with LoRA support...")
             model, _ = create_hybrid_model(args)  # create_hybrid_model returns (model, tokenizer)
@@ -282,30 +295,27 @@ def main():
                 
                 print(f"Training completed in {format_time(time.time() - start_time)}")
         
-        # Evaluation
-        if not args.train_only:
-            # Wait for all processes to finish training before starting evaluation
-            if is_ddp:
-                dist.barrier()
-                
-            if rank == 0:
-                print("Starting detailed evaluation...")
-                if logger:
-                    logger.info("Starting detailed evaluation...")
+        # Evaluation - only run on rank 0 to avoid distributed hang
+        if not args.train_only and rank == 0:
+            print("Starting detailed evaluation...")
+            if logger:
+                logger.info("Starting detailed evaluation...")
             
-            # Run evaluation on all processes, but save/print results only on rank 0
+            # Run evaluation only on rank 0 to avoid distributed issues
             eval_results = evaluate_model_detailed(model, val_loader, tokenizer, device, args)
             
             # Print and save evaluation results
-            if rank == 0:
-                print_evaluation_summary(eval_results)
-                # Use the same timestamped results directory
-                eval_results_file = os.path.join(results_dir, "evaluation_results.json")
-                save_evaluation_results(eval_results, eval_results_file)
-                
-                # Log evaluation results
-                if logger:
-                    log_evaluation_results(logger, eval_results)
+            print_evaluation_summary(eval_results)
+            # Use the same timestamped results directory
+            eval_results_file = os.path.join(results_dir, "evaluation_results.json")
+            save_evaluation_results(eval_results, eval_results_file)
+            
+            # Log evaluation results
+            if logger:
+                log_evaluation_results(logger, eval_results)
+        
+        # 🔧 FIX: dist.barrier() 제거 - 이것이 hang의 원인이었음
+        # DeepSpeed 환경에서는 명시적 barrier가 오히려 문제를 일으킴
         
         # Final summary
         if rank == 0:
@@ -316,24 +326,7 @@ def main():
             if logger:
                 logger.info(f"Total execution time: {format_time(total_time)}")
                 logger.info("✅ Process completed successfully!")
-        
-        # Clean up the DDP process group at the very end
-        if is_ddp:
-            try:
-                # 🔧 FIX: DDP 정리 개선 - 모든 rank가 동기화된 후 정리
-                dist.barrier()
-                dist.destroy_process_group()
-                if rank == 0:
-                    print("✅ DDP process group cleaned up successfully")
-            except Exception as e:
-                if rank == 0:
-                    print(f"⚠️  Warning: Error during DDP cleanup: {e}")
-                # Force cleanup even if there's an error
-                try:
-                    dist.destroy_process_group()
-                except:
-                    pass
-    
+
     except Exception as e:
         # Handle any unexpected errors
         if rank == 0:
