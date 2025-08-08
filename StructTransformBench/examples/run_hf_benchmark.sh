@@ -31,8 +31,9 @@ trap 'handle_error ${LINENO}' ERR
 
 # Find the latest RGTNet final model
 #TARGET_MODEL="/home/ycyoon/work/RGTNet/models/rgtnet_llama-3.2-3b-instruct_20250803_1735/merged_epoch_0"
-TARGET_MODEL="/home/ycyoon/work/RGTNet/models/rgtnet_llama-3.2-1b-instruct_20250807_1044/merged_epoch_0"
-BASE_MODEL="llama-3.2-1b"
+#TARGET_MODEL="/home/ycyoon/work/RGTNet/models/rgtnet_llama-3.2-1b-instruct_20250807_1044/merged_epoch_0"
+TARGET_MODEL="/home/ycyoon/work/RGTNet/models/rgtnet_llama-3.1-8b-instruct_20250807_2116/merged_epoch_0"
+BASE_MODEL="llama-3.1-8b"
 
 echo "🎯 Using RGTNet model: $TARGET_MODEL"
 
@@ -161,11 +162,11 @@ echo "🔥 Running benchmark with trained RGTNet models..."
 if [ -d "$TARGET_MODEL" ]; then
     echo "🎯 Found trained RGTNet model, running full benchmark with all templates..."
     # Use --num_prompts -1 to test all templates instead of default 5
-    # if python "${SCRIPT_DIR}/multi_model_benchmark.py" --trained-model rgtnet "$TARGET_MODEL" --use-local --num_prompts -1; then
-    #     echo "✅ Trained model benchmark completed successfully"
-    # else
-    #     echo "⚠️  Trained model benchmark encountered issues"
-    # fi
+    if python "${SCRIPT_DIR}/multi_model_benchmark.py" --trained-model rgtnet "$TARGET_MODEL" --use-local --num_prompts -1; then
+        echo "✅ Trained model benchmark completed successfully"
+    else
+        echo "⚠️  Trained model benchmark encountered issues"
+    fi
 
     if python "${SCRIPT_DIR}/multi_model_benchmark.py" --models $BASE_MODEL --use-local --num_prompts -1; then
         echo "✅ Trained model benchmark completed successfully"
@@ -173,22 +174,22 @@ if [ -d "$TARGET_MODEL" ]; then
         echo "⚠️  Trained model benchmark encountered issues"
     fi
     
-    # # If jailbreak dataset exists, also run dataset-based evaluation
-    # if [ -f "$JAILBREAK_DATASET" ]; then
-    #     echo ""
-    #     echo "🎯 Running dataset-based jailbreak evaluation..."
+    # If jailbreak dataset exists, also run dataset-based evaluation
+    if [ -f "$JAILBREAK_DATASET" ]; then
+        echo ""
+        echo "🎯 Running dataset-based jailbreak evaluation..."
         
-    #     # Test different jailbreak methods
-    #     for METHOD in PAIR WildteamAttack Jailbroken; do
-    #         echo "🔄 Testing with $METHOD jailbreak method..."
-    #         if python "${SCRIPT_DIR}/run_PAIR.py" --use-jailbreak-dataset "$JAILBREAK_DATASET" --jailbreak-method "$METHOD" --use-trained-model --trained-model-path "$TARGET_MODEL"; then
-    #             echo "✅ $METHOD dataset-based evaluation completed"
+        # Test different jailbreak methods
+        for METHOD in PAIR WildteamAttack Jailbroken; do
+            echo "🔄 Testing with $METHOD jailbreak method..."
+            if python "${SCRIPT_DIR}/run_PAIR.py" --use-jailbreak-dataset "$JAILBREAK_DATASET" --jailbreak-method "$METHOD" --use-trained-model --trained-model-path "$TARGET_MODEL"; then
+                echo "✅ $METHOD dataset-based evaluation completed"
 
-    #         else
-    #             echo "⚠️  $METHOD dataset-based evaluation encountered issues"
-    #         fi
-    #     done
-    # fi
+            else
+                echo "⚠️  $METHOD dataset-based evaluation encountered issues"
+            fi
+        done
+    fi
 
     if [ -f "$JAILBREAK_DATASET" ]; then
         echo ""
@@ -209,87 +210,6 @@ else
     echo "⚠️  No trained RGTNet models found, skipping trained model benchmark"
 fi
 
-echo ""
-# Run the benchmark with PAIR attack (if available)
-echo "🔥 Running PAIR attack benchmark..."
-# Test with foundation model
-if python "${SCRIPT_DIR}/run_PAIR.py" --target-model llama-3.2-3b; then
-    echo "✅ PAIR attack on foundation model completed successfully"
-    PAIR_RESULT=$(ls -t PAIR_results_*.json 2>/dev/null | head -1)
-    [ -n "$PAIR_RESULT" ] && RESULT_FILES+=("$PAIR_RESULT")
-else
-    echo "⚠️  PAIR attack on foundation model encountered issues"
-fi
-    
-    # Test with trained model (if available)
-    if [ -f "$TARGET_MODEL" ]; then
-        echo "🎯 Running PAIR attack on trained RGTNet model..."
-        if python "${SCRIPT_DIR}/run_PAIR.py" --use-trained-model --trained-model-path "$TARGET_MODEL" --dataset-size 10; then
-            echo "✅ PAIR attack on trained model completed successfully"
-            TRAINED_PAIR_RESULT=$(ls -t *trained*result*.jsonl 2>/dev/null | head -1)
-            [ -n "$TRAINED_PAIR_RESULT" ] && RESULT_FILES+=("$TRAINED_PAIR_RESULT")
-        else
-            echo "⚠️  PAIR attack on trained model encountered issues"
-        fi
-    fi
-else
-    echo "⚠️  PAIR attack module not available, skipping..."
-fi
-
-# echo ""
-# echo "🔥 Running WildteamAttack benchmark..."
-# if python -c "import easyjailbreak.attacker" 2>/dev/null; then
-#     if python "${SCRIPT_DIR}/run_WildteamAttack.py" --target-model llama-3.2-3b --dataset-size 10 --action generate; then
-#         echo "✅ WildteamAttack generate completed successfully"
-#     else
-#         echo "⚠️  WildteamAttack generate encountered issues"
-#     fi
-    
-#     if python "${SCRIPT_DIR}/run_WildteamAttack.py" --target-model llama-3.2-3b --dataset-size 10 --action attack; then
-#         echo "✅ WildteamAttack attack completed successfully"
-        
-#         # Find the most recent WildteamAttack result files
-#         # Look for summary files first
-#         WILD_SUMMARY=$(ls -t logs/WildteamAttack_*/WildteamAttack_summary_*.json 2>/dev/null | head -1)
-#         if [ -n "$WILD_SUMMARY" ]; then
-#             RESULT_FILES+=("$WILD_SUMMARY")
-#             echo "📊 Found WildteamAttack summary: $WILD_SUMMARY"
-#         fi
-        
-#         # Look for any result files in the WildteamAttack directory
-#         WILD_RESULTS=$(find logs/WildteamAttack_*/ -name "*.json" -type f 2>/dev/null | head -5)
-#         for result_file in $WILD_RESULTS; do
-#             if [[ "$result_file" != "$WILD_SUMMARY" ]]; then
-#                 RESULT_FILES+=("$result_file")
-#             fi
-#         done
-        
-#         # Alternative fallback
-#         if [ ${#RESULT_FILES[@]} -eq 0 ]; then
-#             WILD_RESULT=$(ls -t WildteamAttack_results_*.json 2>/dev/null | head -1)
-#             [ -n "$WILD_RESULT" ] && RESULT_FILES+=("$WILD_RESULT")
-#         fi
-#     else
-#         echo "⚠️  WildteamAttack attack encountered issues"
-#     fi
-# else
-#     echo "⚠️  WildteamAttack module not available, skipping..."
-# fi
-
-# echo ""
-# echo "🔥 Running Jailbroken attack benchmark..."
-# if python -c "import easyjailbreak.attacker.Jailbroken_wei_2023" 2>/dev/null; then
-#     if python "${SCRIPT_DIR}/run_jailbroken.py" --target-model llama-3.2-3b --dataset-size 10; then
-#         echo "✅ Jailbroken attack completed successfully"
-#         # Find the most recent jailbroken result file
-#         JAIL_RESULT=$(ls -t jailbroken_results_*.json 2>/dev/null | head -1)
-#         [ -n "$JAIL_RESULT" ] && RESULT_FILES+=("$JAIL_RESULT")
-#     else
-#         echo "⚠️  Jailbroken attack encountered issues"
-#     fi
-# else
-#     echo "⚠️  Jailbroken attack module not available, skipping..."
-# fi
 
 echo ""
 echo "🎉 Benchmark execution completed!"

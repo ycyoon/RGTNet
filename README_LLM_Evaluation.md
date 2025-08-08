@@ -157,3 +157,4 @@ python evaluate_multiple_models.py --create_sample_config
 - **BERTScore**: 0-1 범위, 높을수록 좋음
 - **길이 차이**: 참조와 예측 간의 길이 차이, 작을수록 좋음
 - **다양성**: Type-Token Ratio와 Simpson Diversity, 참조와 유사할수록 좋음
+

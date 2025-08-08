@@ -1120,6 +1120,11 @@ def create_dynamic_model_configs():
             "display_name": "Llama 3.1 8B",
             "category": "medium",
         },
+        "qwen-3-8b": {
+        "model_name": "Qwen/Qwen3-8B-FP8",
+        "base_url": 8001,
+        "api_key": "EMPTY"
+        },
         "qwen-2.5-7b": {
             "model_name": "Qwen/Qwen2.5-7B-Instruct",
             "port": 8004,

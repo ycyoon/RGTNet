@@ -6,6 +6,7 @@ import time
 import requests
 import json
 import hashlib
+import pickle
 from datetime import datetime
 
 # OFFLINE_MODE_PATCH_APPLIED
@@ -42,20 +43,32 @@ class RGTNetModel(ModelBase):
         self.model_path = model_path
         self.pretrained_model_name = pretrained_model_name or "meta-llama/Llama-3.2-3B-Instruct"
         
-        # Force single GPU usage to prevent device mismatch
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+        # Select device without forcing a specific GPU index
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         print(f"🔧 Loading RGTNet model from: {model_path}")
         print(f"🔧 Using device: {self.device}")
         
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Create model configuration
+        # Create model configuration first
         self._setup_model_config()
+
+        # Load tokenizer (prefer trained model dir if it is a HF directory)
+        try:
+            tokenizer_source = self.merged_model_path if (
+                hasattr(self, 'merged_model_path')
+                and self.merged_model_path
+                and os.path.isdir(self.merged_model_path)
+                and os.path.exists(os.path.join(self.merged_model_path, 'tokenizer.json'))
+            ) else self.pretrained_model_name
+
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+        except Exception as e:
+            print(f"⚠️ Failed to load tokenizer from preferred source, falling back to base model: {e}")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_name)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load the trained model
         self.model = self._load_trained_model()
@@ -137,7 +150,7 @@ class RGTNetModel(ModelBase):
                     model = AutoModelForCausalLM.from_pretrained(
                         model_dir,
                         torch_dtype=torch.float16,
-                        device_map=self.device,
+                        device_map="auto",
                         trust_remote_code=True
                     )
                     print("✅ HuggingFace model loaded successfully")
@@ -180,6 +193,25 @@ class RGTNetModel(ModelBase):
         """Load RGTNet model with proper weight mapping from base_model.* to model.*"""
         import json
         from transformers import LlamaForCausalLM, LlamaConfig
+        
+        # If sharded weights exist (index file present), prefer loading via Transformers directly
+        shard_index_json = os.path.join(model_dir, "pytorch_model.bin.index.json")
+        shard_index_st = os.path.join(model_dir, "model.safetensors.index.json")
+        if os.path.exists(shard_index_json) or os.path.exists(shard_index_st):
+            try:
+                from transformers import AutoModelForCausalLM
+                print("📦 Detected sharded weights (index found), loading via Transformers...")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_dir,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                print("✅ RGTNet (sharded) model loaded successfully via Transformers")
+                return model
+            except Exception as e:
+                print(f"❌ Failed to load sharded model via Transformers: {e}")
+                # Fallback to manual mapping below
         
         # Load state dict directly
         print("🔧 Loading state dict directly...")
@@ -280,15 +312,18 @@ class RGTNetModel(ModelBase):
                     padding=True
                 )
                 
-                # Move inputs to device explicitly
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                # Move inputs to device explicitly unless model is sharded with its own device map
+                if getattr(self.model, 'hf_device_map', None) is not None:
+                    model_inputs = inputs
+                else:
+                    model_inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 
                 # Generate
                 try:
                     with torch.amp.autocast('cuda'):
                         outputs = self.model.generate(
-                            inputs['input_ids'],
-                            attention_mask=inputs['attention_mask'],
+                            model_inputs['input_ids'],
+                            attention_mask=model_inputs['attention_mask'],
                             max_new_tokens=kwargs.get('max_tokens', 512),
                             min_new_tokens=20,  # 최소 20개 토큰 생성
                             temperature=kwargs.get('temperature', 0.7),
@@ -329,6 +364,7 @@ TARGET_BASE_URL = "http://localhost:8001/v1"  # Target model (Llama 3.2 3B)
 EVAL_BASE_URL = "http://localhost:8003/v1"    # Eval model (HarmBench)
 
 final_eval_model = None
+eval_tokenizer = None
 # Load Qwen3-14B-FP8 as evaluation model
 # print("🔧 Loading Qwen3-14B-FP8 evaluation model...")
 # try:
@@ -368,6 +404,11 @@ FOUNDATION_MODELS = {
     },
     "llama-3.1-8b": {
         "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+        "base_url": TARGET_BASE_URL,
+        "api_key": "EMPTY"
+    },
+    "qwen-3-8b": {
+        "model_name": "Qwen/Qwen3-8B-FP8",
         "base_url": TARGET_BASE_URL,
         "api_key": "EMPTY"
     },

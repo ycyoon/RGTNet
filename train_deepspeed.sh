@@ -14,10 +14,11 @@ GRADIENT_ACCUMULATION=1
 
 # Model configuration
 #MODEL_NAME="meta-llama/Llama-3.2-3B-Instruct"
-MODEL_NAME="meta-llama/Llama-3.2-1B-Instruct"
+#MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+MODEL_NAME="openai/gpt-oss-20b"
 EPOCHS=1
 LEARNING_RATE=5e-5
-MAX_SEQ_LEN=2048
+MAX_SEQ_LEN=512
 
 # LoRA configuration (set to false by default)
 USE_LORA=false
