@@ -241,127 +241,24 @@ class RGTNetModel(ModelBase):
         print(f"✅ RGTNet model loaded successfully on {self.device}")
     
     def _setup_model_config(self):
-        """Setup model configuration based on pretrained model"""
+        """Setup model configuration based on checkpoint if available, fallback to pretrained model"""
         from transformers import AutoConfig
-        import os
         
-        # Check if model_path is a directory (merged model) or file
-        if os.path.isdir(self.model_path):
-            print(f"📁 Model path is a directory: {self.model_path}")
-            # Check if it's a HuggingFace model directory
-            if os.path.exists(os.path.join(self.model_path, 'config.json')):
-                print("📋 Detected HuggingFace model directory")
-                self.merged_model_path = self.model_path
-            else:
-                print("⚠️ No config.json found in directory")
-                self.merged_model_path = None
-        else:
-            print(f"📄 Model path is a file: {self.model_path}")
-            self.merged_model_path = self.model_path
-        
-        # Get pretrained model config
-        pretrained_config = AutoConfig.from_pretrained(self.pretrained_model_name)
-        
-        # Create args object for model creation
-        class ModelArgs:
-            def __init__(self, pretrained_model_name):
-                self.d_model = pretrained_config.hidden_size
-                self.nhead = pretrained_config.num_attention_heads
-                self.num_layers = pretrained_config.num_hidden_layers
-                self.dropout = 0.1
-                self.max_seq_len = getattr(pretrained_config, 'max_position_embeddings', 2048)
-                self.bias_delta = 1.0
-                self.vocab_size = pretrained_config.vocab_size
-                self.pretrained_model_name = pretrained_model_name
-        
-        self.args = ModelArgs(self.pretrained_model_name)
-        print(f"📊 Model config: d_model={self.args.d_model}, layers={self.args.num_layers}, heads={self.args.nhead}")
-    
-    def _load_rgtnet_with_mapping_fix(self, model_dir):
-        """Load RGTNet model with proper weight mapping from base_model.* to model.*"""
-        import json
-        from transformers import LlamaForCausalLM, LlamaConfig
-        
-        # Load state dict directly
-        print("🔧 Loading state dict directly...")
-        state_dict_path = os.path.join(model_dir, "pytorch_model.bin")
-        if os.path.exists(state_dict_path):
-            state_dict = torch.load(state_dict_path, map_location='cpu')
-            print(f"📦 Loaded state dict with {len(state_dict)} keys")
-        else:
-            # Try to load using safetensors
-            try:
-                from safetensors import safe_open
-                safetensors_path = os.path.join(model_dir, "model.safetensors")
-                if os.path.exists(safetensors_path):
-                    state_dict = {}
-                    with safe_open(safetensors_path, framework="pt", device="cpu") as f:
-                        for key in f.keys():
-                            state_dict[key] = f.get_tensor(key)
-                    print(f"📦 Loaded state dict from safetensors with {len(state_dict)} keys")
-                else:
-                    raise FileNotFoundError("No pytorch_model.bin or model.safetensors found")
-            except ImportError:
-                raise FileNotFoundError("No pytorch_model.bin found and safetensors not available")
-        
-        # Create a mapping from base_model.* to model.*
-        print("🔧 Fixing weight key mapping...")
-        fixed_state_dict = {}
-        
-        for key, value in state_dict.items():
-            if key.startswith('base_model.model.'):
-                # Remove 'base_model.' prefix to get 'model.*'
-                new_key = key.replace('base_model.', '')
-                fixed_state_dict[new_key] = value
-            elif key.startswith('base_model.lm_head.'):
-                # Map base_model.lm_head.* to lm_head.*
-                new_key = key.replace('base_model.', '')
-                fixed_state_dict[new_key] = value
-            elif key.startswith('base_model.'):
-                # For other base_model keys, remove base_model prefix
-                new_key = key.replace('base_model.', '')
-                fixed_state_dict[new_key] = value
-            else:
-                # Keep other keys as-is
-                fixed_state_dict[key] = value
-        
-        print(f"✅ Fixed state dict with {len(fixed_state_dict)} keys")
-        
-        # Load config and create model
-        config_path = os.path.join(model_dir, "config.json")
-        with open(config_path, 'r') as f:
-            config_dict = json.load(f)
-        
-        config = LlamaConfig(**config_dict)
-        
-        # Create empty model
-        print("🔧 Creating empty LlamaForCausalLM model...")
-        model = LlamaForCausalLM(config)
-        
-        # Load the fixed weights
-        print("🔧 Loading fixed weights...")
-        missing_keys, unexpected_keys = model.load_state_dict(fixed_state_dict, strict=False)
-        
-        if missing_keys:
-            print(f"⚠️ Missing keys: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
-            # Check if lm_head.weight is missing - it might need to be tied to embed_tokens
-            if 'lm_head.weight' in missing_keys and 'model.embed_tokens.weight' in fixed_state_dict:
-                print("🔧 Tying lm_head.weight to embed_tokens.weight...")
-                fixed_state_dict['lm_head.weight'] = fixed_state_dict['model.embed_tokens.weight']
-                # Reload with the tied weight
-                missing_keys, unexpected_keys = model.load_state_dict(fixed_state_dict, strict=False)
-                print(f"✅ After tying weights - Missing keys: {len(missing_keys)}")
-        else:
-            print("✅ No missing keys!")
-        
-        if unexpected_keys:
-            print(f"⚠️ Unexpected keys: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
-        
-        # Move to device
-        model = model.to(self.device, dtype=torch.float16)
-        print("✅ RGTNet model loaded successfully with weight mapping fix")
-        
-        return model
+        # First try to get config from checkpoint
+        checkpoint_config = None
+        try:
+            checkpoint = torch.load(self.model_path, map_location='cpu')
+            if 'config' in checkpoint:
+                checkpoint_config = checkpoint['config']
+                print("📋 Using model config from checkpoint")
+            elif 'args' in checkpoint:
+                checkpoint_config = checkpoint['args']
+                print("📋 Using model args from checkpoint")
+            elif hasattr(checkpoint.get('model_state_dict', {}), '_modules'):
+                # Try to infer from model structure
+                print("🔍 Attempting to infer config from model structure...")
+        except Exception as e:
+            print(f"⚠️ Could not read checkpoint config: {e}")
         
         if checkpoint_config:
             # Use checkpoint config directly
@@ -454,32 +351,6 @@ class RGTNetModel(ModelBase):
             # Fallback to our custom model loading
             print("🔄 Falling back to custom model loading...")
             model = create_model(self.args, self.tokenizer.pad_token_id)
-            
-            try:
-                if os.path.isdir(model_dir):
-                    # Directory: try to use load_checkpoint function
-                    model = load_checkpoint(model_dir, model, self.device)
-                    print("✅ Trained model loaded successfully using load_checkpoint")
-                else:
-                    # Single file: load directly
-                    checkpoint = torch.load(model_dir, map_location=self.device)
-                    if isinstance(checkpoint, dict):
-                        if 'state_dict' in checkpoint:
-                            model.load_state_dict(checkpoint['state_dict'])
-                        elif 'model' in checkpoint:
-                            model.load_state_dict(checkpoint['model'])
-                        else:
-                            model.load_state_dict(checkpoint)
-                    else:
-                        model.load_state_dict(checkpoint)
-                    model = model.to(self.device)
-                    print("✅ Single file model loaded successfully")
-                    
-            except Exception as e:
-                print(f"❌ Failed to load model: {e}")
-                raise
-        
-        return model
         
         if 'model_state_dict' in checkpoint:
             # Handle FSDP checkpoint with shape fixing

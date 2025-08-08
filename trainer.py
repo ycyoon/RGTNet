@@ -564,8 +564,8 @@ def train_model(model, train_loader, val_loader, device, args, local_rank=0, log
             if logger:
                 logger.info(f"Checkpoint saved at epoch {epoch+1} in {args.timestamped_dir}")
         
-            # 모델 병합
-            merge_output_dir = os.path.join(os.path.dirname(args.timestamped_dir), f"merged_epoch_{epoch}")
+            # 모델 병합 - timestamped_dir 밑에 저장
+            merge_output_dir = os.path.join(args.timestamped_dir, f"merged_epoch_{epoch}")
             
             success = merge_deepspeed_checkpoint(args.timestamped_dir, merge_output_dir, logger)
             if success:

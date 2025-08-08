@@ -13,8 +13,9 @@ BATCH_SIZE=1
 GRADIENT_ACCUMULATION=1
 
 # Model configuration
-MODEL_NAME="meta-llama/Llama-3.2-3B-Instruct"
-EPOCHS=3
+#MODEL_NAME="meta-llama/Llama-3.2-3B-Instruct"
+MODEL_NAME="meta-llama/Llama-3.2-1B-Instruct"
+EPOCHS=1
 LEARNING_RATE=5e-5
 MAX_SEQ_LEN=2048
 

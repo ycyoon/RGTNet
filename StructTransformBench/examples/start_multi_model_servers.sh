@@ -95,7 +95,7 @@ start_server() {
 # NOTE: Target model on port 8001 will be started dynamically by run_PAIR.py
 
 # Start Llama-3.1-70B-Instruct for PAIR attack model (single GPU)
-start_server "meta-llama/Llama-3.1-70B-Instruct" 8002 "Llama-3.1-70B-Instruct" "0,2" 2 8192 0.95
+# start_server "meta-llama/Llama-3.1-70B-Instruct" 8002 "Llama-3.1-70B-Instruct" "0,2" 2 8192 0.95
 
 # Start HarmBench-Llama-2-13b for PAIR eval model
 start_server "cais/HarmBench-Llama-2-13b-cls" 8003 "HarmBench-Llama-2-13b" "4" 1 8192
@@ -104,7 +104,7 @@ start_server "cais/HarmBench-Llama-2-13b-cls" 8003 "HarmBench-Llama-2-13b" "4" 1
 start_server "allenai/wildguard" 8004 "WildGuard" "5" 1 8192
 
 # Start Meta-Llama-3-70B for final evaluation (Fix: Use Meta-Llama-3-70B-Instruct)
-start_server "meta-llama/Meta-Llama-3-70B-Instruct" 8006 "Meta-Llama-3-70B-Instruct" "6,7" 2 8192
+# start_server "meta-llama/Meta-Llama-3-70B-Instruct" 8006 "Meta-Llama-3-70B-Instruct" "6,7" 2 8192
 
 echo "🎯 All servers started! Checking status with improved health checks..."
 
@@ -137,7 +137,7 @@ check_server_health() {
 
 # Check all servers (excluding port 8001 which is managed by run_PAIR.py)
 all_running=true
-for port in 8002 8003 8004 8006; do
+for port in 8003 8004; do
     if ! check_server_health $port; then
         all_running=false
         echo "❌ Server on port $port failed to start. Check server_${port}.log for details."

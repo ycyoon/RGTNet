@@ -393,3 +393,85 @@ def create_model(args, pad_idx):
     print("   - Pretrained weight initialization")
     
     return model
+
+def load_checkpoint(checkpoint_path, model, device='cuda'):
+    """
+    Load a trained model checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint directory or file
+        model: The model to load weights into
+        device: Device to load the model on
+    
+    Returns:
+        The loaded model
+    """
+    import os
+    import json
+    
+    print(f"🔄 Loading checkpoint from: {checkpoint_path}")
+    
+    # Check if it's a directory (DeepSpeed checkpoint) or file
+    if os.path.isdir(checkpoint_path):
+        # DeepSpeed checkpoint directory
+        print("📁 Detected DeepSpeed checkpoint directory")
+        
+        # Look for latest checkpoint
+        latest_file = os.path.join(checkpoint_path, "latest")
+        if os.path.exists(latest_file):
+            with open(latest_file, 'r') as f:
+                latest_tag = f.read().strip()
+            checkpoint_dir = os.path.join(checkpoint_path, latest_tag)
+            print(f"📋 Using latest checkpoint: {latest_tag}")
+        else:
+            # Fallback: look for epoch directories
+            epoch_dirs = [d for d in os.listdir(checkpoint_path) if d.startswith('epoch_')]
+            if epoch_dirs:
+                latest_epoch = sorted(epoch_dirs, key=lambda x: int(x.split('_')[1]))[-1]
+                checkpoint_dir = os.path.join(checkpoint_path, latest_epoch)
+                print(f"📋 Using latest epoch: {latest_epoch}")
+            else:
+                checkpoint_dir = checkpoint_path
+                print("📋 Using checkpoint directory directly")
+        
+        # Load DeepSpeed checkpoint
+        try:
+            from deepspeed.checkpoint import load_checkpoint as ds_load_checkpoint
+            _, _, _, _ = ds_load_checkpoint(checkpoint_dir, model)
+            print("✅ DeepSpeed checkpoint loaded successfully")
+        except ImportError:
+            print("⚠️ DeepSpeed not available, trying manual loading...")
+            # Manual loading for DeepSpeed checkpoints
+            model_states_file = os.path.join(checkpoint_dir, "mp_rank_00_model_states.pt")
+            if os.path.exists(model_states_file):
+                checkpoint = torch.load(model_states_file, map_location=device)
+                if 'module' in checkpoint:
+                    model.load_state_dict(checkpoint['module'])
+                else:
+                    model.load_state_dict(checkpoint)
+                print("✅ Manual checkpoint loading successful")
+            else:
+                raise FileNotFoundError(f"Model states file not found: {model_states_file}")
+    
+    else:
+        # Single file checkpoint
+        print("📄 Detected single file checkpoint")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        if isinstance(checkpoint, dict):
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            elif 'model' in checkpoint:
+                model.load_state_dict(checkpoint['model'])
+            else:
+                model.load_state_dict(checkpoint)
+        else:
+            model.load_state_dict(checkpoint)
+        
+        print("✅ Single file checkpoint loaded successfully")
+    
+    model = model.to(device)
+    model.eval()
+    
+    print(f"✅ Model loaded and moved to {device}")
+    return model

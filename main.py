@@ -279,10 +279,17 @@ def main():
             
             # Save training results and log final performance
             if rank == 0:
-                # Create timestamped results directory
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                results_dir = os.path.join(os.path.dirname(args.results_file), f"results_{timestamp}")
+                # Create timestamped results directory in logs folder with same timestamp as model
+                # Extract timestamp from model directory name
+                model_dir_name = os.path.basename(args.timestamped_dir)
+                # Extract timestamp from "rgtnet_llama-3.2-3b-instruct_20241201_1430" -> "20241201_1430"
+                timestamp = model_dir_name.split('_')[-2] + '_' + model_dir_name.split('_')[-1]
+                
+                # Create logs directory if it doesn't exist
+                logs_dir = os.path.join(os.path.dirname(args.results_file), "logs")
+                os.makedirs(logs_dir, exist_ok=True)
+                
+                results_dir = os.path.join(logs_dir, f"results_{timestamp}")
                 os.makedirs(results_dir, exist_ok=True)
                 
                 # Save training results in timestamped directory
@@ -306,7 +313,7 @@ def main():
             
             # Print and save evaluation results
             print_evaluation_summary(eval_results)
-            # Use the same timestamped results directory
+            # Use the same timestamped results directory (already created above)
             eval_results_file = os.path.join(results_dir, "evaluation_results.json")
             save_evaluation_results(eval_results, eval_results_file)
             
